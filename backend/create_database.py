@@ -70,9 +70,9 @@ CREATE TABLE IF NOT EXISTS quarterbacks (
 ''')
 
 # Load data from CSVs into DataFrames
-wr_data = pd.read_csv('filtered_wide_receivers.csv')
-rb_data = pd.read_csv('filtered_running_backs.csv')
-qb_data = pd.read_csv('filtered_quarterbacks.csv')
+wr_data = pd.read_csv('wide_receivers_rankings_week_4.csv')
+rb_data = pd.read_csv('running_backs_rankings_week_4.csv')
+qb_data = pd.read_csv('quarterbacks_rankings_week_4.csv')
 
 # Insert data into tables
 wr_data.to_sql('wide_receivers', conn, if_exists='append', index=False)
