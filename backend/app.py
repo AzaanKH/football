@@ -1,8 +1,10 @@
 from flask import Flask, request, jsonify
 import pandas as pd
 import pickle
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 
 # Load your trained models
 with open('rb_model.pkl', 'rb') as f:
@@ -31,6 +33,9 @@ def predict():
     # Ensure the DataFrame has the required feature columns
     df = df[feature_columns].fillna(0)  # Handle missing values
     
+    for col in feature_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
     # Select the appropriate model
     if position == 'rb':
         predictions = rb_model.predict(df)
@@ -50,5 +55,7 @@ def predict():
     
     return jsonify(top_players.to_dict(orient='records'))
 
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
