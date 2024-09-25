@@ -4,11 +4,26 @@ from sklearn.model_selection import GridSearchCV
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
+import pickle
 
 # Load the data
 rb_data = pd.read_csv('filtered_running_backs.csv')
 qb_data = pd.read_csv('filtered_quarterbacks.csv')
 wr_data = pd.read_csv('filtered_wide_receivers.csv')
+week_1_qbs_df = pd.read_csv('week_1_qbs.csv')
+week_1_rbs_df = pd.read_csv('week_1_rbs.csv')
+week_1_wrs_df = pd.read_csv('week_1_wrs.csv')
+week_2_qbs_df = pd.read_csv('week_2_qbs.csv')
+week_2_rbs_df = pd.read_csv('week_2_rbs.csv')
+week_2_wrs_df = pd.read_csv('week_2_wrs.csv')
+week_3_qbs_df = pd.read_csv('week_3_qbs.csv')
+week_3_rbs_df = pd.read_csv('week_3_rbs.csv')
+week_3_wrs_df = pd.read_csv('week_3_wrs.csv')
+week_4_rankings = pd.read_csv('week_4_rankings.csv')
+
+all_qb_data = pd.concat([qb_data, week_1_qbs_df, week_2_qbs_df, week_3_qbs_df], ignore_index=True)
+all_rb_data = pd.concat([rb_data, week_1_rbs_df, week_2_rbs_df, week_3_rbs_df], ignore_index=True)
+all_wr_data = pd.concat([wr_data, week_1_wrs_df, week_2_wrs_df, week_3_wrs_df, week_4_rankings], ignore_index=True)
 
 # Define features and target variable
 features = ['PassingYDS', 'PassingTD', 'PassingInt', 'RushingYDS', 'RushingTD', 
@@ -114,12 +129,22 @@ def train_and_evaluate_model(data, features, target, position_name, best_params)
     
     return xgb_model
 
+# Best parameters for each model as previously identified
 best_params_rb = {'colsample_bytree': 0.8, 'learning_rate': 0.1, 'max_depth': 3, 'n_estimators': 200, 'subsample': 0.8}
 best_params_qb = {'colsample_bytree': 0.6, 'learning_rate': 0.1, 'max_depth': 3, 'n_estimators': 200, 'subsample': 0.8}
 best_params_wr = {'colsample_bytree': 0.6, 'learning_rate': 0.2, 'max_depth': 3, 'n_estimators': 200, 'subsample': 0.6}
 
-rb_model = train_and_evaluate_model(rb_data, features, target, "Running Backs", best_params_rb)
+# Train and evaluate models using the combined data
+rb_model = train_and_evaluate_model(all_rb_data, features, target, "Running Backs", best_params_rb)
+qb_model = train_and_evaluate_model(all_qb_data, features, target, "Quarterbacks", best_params_qb)
+wr_model = train_and_evaluate_model(all_wr_data, features, target, "Wide Receivers", best_params_wr)
 
-qb_model = train_and_evaluate_model(qb_data, features, target, "Quarterbacks", best_params_qb)
+# Save the models for later use
+with open('rb_model.pkl', 'wb') as f:
+    pickle.dump(rb_model, f)
 
-wr_model = train_and_evaluate_model(wr_data, features, target, "Wide Receivers", best_params_wr)
+with open('qb_model.pkl', 'wb') as f:
+    pickle.dump(qb_model, f)
+
+with open('wr_model.pkl', 'wb') as f:
+    pickle.dump(wr_model, f)
