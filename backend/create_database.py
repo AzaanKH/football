@@ -1,11 +1,9 @@
 import sqlite3
 import pandas as pd
 
-# Connect to the SQLite database (or create it if it doesn't exist)
 conn = sqlite3.connect('football_season.db')
 cursor = conn.cursor()
 
-# Create tables for each position
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS wide_receivers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,18 +67,15 @@ CREATE TABLE IF NOT EXISTS quarterbacks (
 )
 ''')
 
-# Load data from CSVs into DataFrames
 wr_data = pd.read_csv('wide_receivers_rankings_week_4.csv')
 rb_data = pd.read_csv('running_backs_rankings_week_4.csv')
 qb_data = pd.read_csv('quarterbacks_rankings_week_4.csv')
 
-# Insert data into tables
 wr_data.to_sql('wide_receivers', conn, if_exists='append', index=False)
 rb_data.to_sql('running_backs', conn, if_exists='append', index=False)
 qb_data.to_sql('quarterbacks', conn, if_exists='append', index=False)
 
 print("Data inserted successfully")
 
-# Commit and close the connection
 conn.commit()
 conn.close()

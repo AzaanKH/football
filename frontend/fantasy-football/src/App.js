@@ -1,65 +1,48 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import './App.css'; 
 
 const App = () => {
-  const [position, setPosition] = useState('wr'); // Default position
-  const [players, setPlayers] = useState([
-    {
-      PlayerName: '',
-      PassingYDS: 0,
-      PassingTD: 0,
-      PassingInt: 0,
-      RushingYDS: 0,
-      RushingTD: 0,
-      ReceivingRec: 0,
-      ReceivingYDS: 0,
-      ReceivingTD: 0,
-      Fum: 0,
-      TouchCarries: 0,
-      TouchReceptions: 0,
-      Targets: 0,
-      RzTouch: 0,
-      Rank: 0,
-    },
-  ]);
+  const [position, setPosition] = useState('wr'); 
+  const [players, setPlayers] = useState([]); 
+  const [selectedPlayers, setSelectedPlayers] = useState([]); 
   const [predictions, setPredictions] = useState([]);
 
-  const handlePositionChange = (e) => setPosition(e.target.value);
+  useEffect(() => {
+    const fetchPlayers = async () => {
+      try {
+        const response = await axios.get(`http://localhost:5001/get_players/${position}`);
+        setPlayers(response.data); 
+      } catch (error) {
+        console.error('Error fetching players:', error);
+      }
+    };
+    fetchPlayers();
+  }, [position]);
+
+  const handlePositionChange = (e) => {
+    setPosition(e.target.value);
+    setSelectedPlayers([]); 
+  };
 
   const handlePlayerChange = (index, e) => {
-    const updatedPlayers = [...players];
-    updatedPlayers[index][e.target.name] = e.target.value;
-    setPlayers(updatedPlayers);
+    const playerName = e.target.value;
+    const playerData = players.find(player => player.PlayerName === playerName);
+
+    const updatedSelectedPlayers = [...selectedPlayers];
+    updatedSelectedPlayers[index] = playerData || {}; 
+    setSelectedPlayers(updatedSelectedPlayers);
   };
 
   const addPlayer = () => {
-    setPlayers([
-      ...players,
-      {
-        PlayerName: '',
-        PassingYDS: 0,
-        PassingTD: 0,
-        PassingInt: 0,
-        RushingYDS: 0,
-        RushingTD: 0,
-        ReceivingRec: 0,
-        ReceivingYDS: 0,
-        ReceivingTD: 0,
-        Fum: 0,
-        TouchCarries: 0,
-        TouchReceptions: 0,
-        Targets: 0,
-        RzTouch: 0,
-        Rank: 0,
-      },
-    ]);
+    setSelectedPlayers([...selectedPlayers, {}]); 
   };
 
   const getPredictions = async () => {
     try {
       const response = await axios.post('http://localhost:5001/predict', {
         position,
-        players,
+        players: selectedPlayers, 
       });
       setPredictions(response.data);
     } catch (error) {
@@ -69,11 +52,11 @@ const App = () => {
   };
 
   return (
-    <div className="App" style={{ padding: '20px' }}>
+    <div className="App">
       <h1>Fantasy Football Start Prediction</h1>
 
-      <div style={{ marginBottom: '20px' }}>
-        <label>Select Position: </label>
+      <div className="select-position">
+        <label>Select Position:</label>
         <select value={position} onChange={handlePositionChange}>
           <option value="wr">Wide Receiver</option>
           <option value="rb">Running Back</option>
@@ -81,140 +64,32 @@ const App = () => {
         </select>
       </div>
 
-      <h2>Player Stats</h2>
-      {players.map((player, index) => (
-        <div key={index} style={{ marginBottom: '10px', padding: '10px', border: '1px solid #ddd' }}>
-          <input
-            type="text"
-            placeholder="Player Name"
-            name="PlayerName"
-            value={player.PlayerName}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '150px' }}
-          />
-          <input
-            type="number"
-            placeholder="PassingYDS"
-            name="PassingYDS"
-            value={player.PassingYDS}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '90px' }}
-          />
-          <input
-            type="number"
-            placeholder="PassingTD"
-            name="PassingTD"
-            value={player.PassingTD}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '90px' }}
-          />
-          <input
-            type="number"
-            placeholder="PassingInt"
-            name="PassingInt"
-            value={player.PassingInt}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '90px' }}
-          />
-          <input
-            type="number"
-            placeholder="RushingYDS"
-            name="RushingYDS"
-            value={player.RushingYDS}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '90px' }}
-          />
-          <input
-            type="number"
-            placeholder="RushingTD"
-            name="RushingTD"
-            value={player.RushingTD}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '90px' }}
-          />
-          <input
-            type="number"
-            placeholder="ReceivingRec"
-            name="ReceivingRec"
-            value={player.ReceivingRec}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '100px' }}
-          />
-          <input
-            type="number"
-            placeholder="ReceivingYDS"
-            name="ReceivingYDS"
-            value={player.ReceivingYDS}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '100px' }}
-          />
-          <input
-            type="number"
-            placeholder="ReceivingTD"
-            name="ReceivingTD"
-            value={player.ReceivingTD}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '90px' }}
-          />
-          <input
-            type="number"
-            placeholder="Fumbles"
-            name="Fum"
-            value={player.Fum}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '70px' }}
-          />
-          <input
-            type="number"
-            placeholder="TouchCarries"
-            name="TouchCarries"
-            value={player.TouchCarries}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '100px' }}
-          />
-          <input
-            type="number"
-            placeholder="TouchReceptions"
-            name="TouchReceptions"
-            value={player.TouchReceptions}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '100px' }}
-          />
-          <input
-            type="number"
-            placeholder="Targets"
-            name="Targets"
-            value={player.Targets}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '70px' }}
-          />
-          <input
-            type="number"
-            placeholder="Red Zone Touches (RzTouch)"
-            name="RzTouch"
-            value={player.RzTouch}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '70px' }}
-          />
-          <input
-            type="number"
-            placeholder="Rank"
-            name="Rank"
-            value={player.Rank}
-            onChange={(e) => handlePlayerChange(index, e)}
-            style={{ marginRight: '10px', width: '70px' }}
-          />
-        </div>
-      ))}
+      <h2>Player Selection</h2>
+      <div className="player-selection">
+        {selectedPlayers.map((player, index) => (
+          <div key={index} className="player-container">
+            <select onChange={(e) => handlePlayerChange(index, e)} value={player?.PlayerName || ''}>
+              <option value="" disabled>Select a player</option>
+              {players.map((p, i) => (
+                <option key={i} value={p.PlayerName}>
+                  {p.PlayerName}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
 
-      <button onClick={addPlayer} style={{ marginTop: '10px' }}>
-        Add Another Player
-      </button>
-      <button onClick={getPredictions} style={{ marginLeft: '10px' }}>
-        Get Predictions
-      </button>
+      <div style={{ textAlign: 'center' }}>
+        <button className="add-player-btn" onClick={addPlayer}>
+          Add Another Player
+        </button>
+        <button className="get-predictions-btn" onClick={getPredictions}>
+          Get Predictions
+        </button>
+      </div>
 
-      <div style={{ marginTop: '20px' }}>
+      <div className="predictions">
         <h2>Predicted Starters</h2>
         {predictions.length > 0 ? (
           <ul>
@@ -225,7 +100,7 @@ const App = () => {
             ))}
           </ul>
         ) : (
-          <p>No predictions yet</p>
+          <p className="no-predictions">No predictions yet</p>
         )}
       </div>
     </div>

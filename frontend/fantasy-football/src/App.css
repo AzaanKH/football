@@ -1,38 +1,133 @@
+/* App.css */
+
+/* General App Container Styling */
 .App {
-  text-align: center;
-}
-
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
-  background-color: #282c34;
+  font-family: 'Arial', sans-serif;
+  background-color: #f8f9fa;
   min-height: 100vh;
+  padding: 40px;
+  color: #333;
+}
+
+h1 {
+  text-align: center;
+  color: #343a40;
+  font-size: 2.5em;
+  margin-bottom: 20px;
+}
+
+h2 {
+  color: #495057;
+  font-size: 1.5em;
+  margin-bottom: 15px;
+  border-bottom: 2px solid #6c757d;
+  padding-bottom: 5px;
+}
+
+/* Select Position Section */
+.select-position {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 25px;
+}
+
+.select-position label {
+  font-weight: bold;
+  margin-right: 10px;
+}
+
+select {
+  padding: 8px 12px;
+  font-size: 1em;
+  border: 1px solid #ced4da;
+  border-radius: 5px;
+  background-color: #ffffff;
+  color: #495057;
+}
+
+/* Player Selection Styling */
+.player-selection {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
 }
 
-.App-link {
-  color: #61dafb;
+.player-container {
+  margin-bottom: 15px;
+  padding: 15px;
+  border: 1px solid #ced4da;
+  border-radius: 5px;
+  background-color: #ffffff;
+  width: 80%;
+  max-width: 600px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.player-container select {
+  width: 100%;
+  padding: 8px;
+  border-radius: 5px;
+  border: 1px solid #ced4da;
+  background-color: #f8f9fa;
+  font-size: 1em;
+}
+
+/* Buttons Styling */
+button {
+  padding: 10px 20px;
+  font-size: 1em;
+  border: none;
+  border-radius: 5px;
+  margin: 10px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #e2e6ea;
+}
+
+.add-player-btn {
+  background-color: #28a745;
+  color: #fff;
+}
+
+.add-player-btn:hover {
+  background-color: #218838;
+}
+
+.get-predictions-btn {
+  background-color: #007bff;
+  color: #fff;
+}
+
+.get-predictions-btn:hover {
+  background-color: #0056b3;
+}
+
+/* Prediction Results Styling */
+.predictions {
+  margin-top: 25px;
+  text-align: center;
+}
+
+.predictions ul {
+  list-style-type: none;
+  padding: 0;
+}
+
+.predictions li {
+  padding: 10px;
+  background-color: #e9ecef;
+  margin: 5px 0;
+  border-radius: 5px;
+  font-weight: bold;
+}
+
+.no-predictions {
+  color: #6c757d;
+  font-style: italic;
 }

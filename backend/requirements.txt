@@ -1,0 +1,7 @@
+pip install flask
+pip install flask-cors
+pip install pandas
+pip install scikit-learn
+pip install xgboost
+pip install pytesseract
+pip install pillow
