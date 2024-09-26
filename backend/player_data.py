@@ -1,7 +1,6 @@
 import pandas as pd
 from io import StringIO
 
-# Provided text data
 text_data = """
 RK,NAME,POS,GP,REC,TGTS,YDS,AVG,TD,LNG,BIG,YDS/G,FUM,LST,YAC,FD
 1,Nico Collins HOU,WR,3,18,28,338,18.8,1,55,5,112.7,0,0,107,16
@@ -53,10 +52,8 @@ RK,NAME,POS,GP,REC,TGTS,YDS,AVG,TD,LNG,BIG,YDS/G,FUM,LST,YAC,FD
 45,Jalen Tolbert DAL,RB,3,14,19,136,9.7,2,19,0,45.3,0,0,39,7
 """
 
-# Convert the text data into a DataFrame
 data = pd.read_csv(StringIO(text_data))
 
-# Save the DataFrame as a CSV file
 output_csv_path = 'wide_recievers_rankings_week_4.csv'
 data.to_csv(output_csv_path, index=False)
 
