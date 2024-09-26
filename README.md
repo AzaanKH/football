@@ -64,5 +64,7 @@ Below is a screenshot of the prediction interface where users can select players
 
 ![Prediction Interface](website_homepage.jpeg)
 
+
+
 And here is a screenshot of the prediction results:
-![Prediction Results](predictions.jpeg)
+![Prediction Results](predicitions.jpeg)
