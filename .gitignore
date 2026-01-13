@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.env
+
+# Models and data
+*.pkl
+catboost_info/
+
+# Node
+node_modules/
+npm-debug.log
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+.mcp.json
+tmpclaude-*
+nul
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres_data/

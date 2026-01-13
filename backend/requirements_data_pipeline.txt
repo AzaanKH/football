@@ -1,0 +1,25 @@
+# Data Pipeline Dependencies
+# Install with: pip install -r requirements_data_pipeline.txt
+
+# HTTP client (async capable)
+httpx>=0.25.0
+
+# Web scraping
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# PostgreSQL
+psycopg2-binary>=2.9.9
+
+# Data processing (already in main requirements)
+pandas>=2.0.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Scheduling for automated updates
+apscheduler>=3.10.0
+
+# Optional: For async operations
+# asyncpg>=0.29.0
+# aiohttp>=3.9.0
