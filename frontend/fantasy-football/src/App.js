@@ -107,7 +107,6 @@ const App = () => {
   const [isLoadingPredictions, setIsLoadingPredictions] = useState(false);
   const [error, setError] = useState(null);
   const [systemStatus, setSystemStatus] = useState(null);
-  const [useLegacy, setUseLegacy] = useState(false);
 
   // Check system status on mount
   useEffect(() => {
@@ -115,14 +114,8 @@ const App = () => {
       try {
         const response = await axios.get(`${API_BASE}/model_status`);
         setSystemStatus(response.data);
-
-        // If weekly predictor not available, fall back to legacy
-        if (!response.data.weekly_predictor_available) {
-          setUseLegacy(true);
-        }
       } catch (error) {
         console.error('Error checking status:', error);
-        setUseLegacy(true);
       }
     };
     checkStatus();
@@ -152,20 +145,12 @@ const App = () => {
       setIsLoadingPlayers(true);
       setError(null);
       try {
-        // Try new PostgreSQL endpoint first
-        let response;
-        try {
-          response = await axios.get(`${API_BASE}/players?position=${position}&limit=200`);
-          setPlayers(response.data.map(p => ({
-            player_id: p.player_id,
-            PlayerName: p.full_name,
-            team: p.team
-          })));
-        } catch {
-          // Fall back to legacy SQLite endpoint
-          response = await axios.get(`${API_BASE}/get_players/${position}`);
-          setPlayers(response.data);
-        }
+        const response = await axios.get(`${API_BASE}/players?position=${position}&limit=200`);
+        setPlayers(response.data.map(p => ({
+          player_id: p.player_id,
+          PlayerName: p.full_name,
+          team: p.team
+        })));
       } catch (error) {
         console.error('Error fetching players:', error);
         setError('Failed to load players. Make sure the backend is running.');
@@ -207,39 +192,20 @@ const App = () => {
     setError(null);
 
     try {
-      let response;
+      const response = await axios.post(`${API_BASE}/predict_week`, {
+        position,
+        player_ids: validIds,
+        week,
+        season
+      });
 
-      if (!useLegacy && systemStatus?.weekly_predictor_available) {
-        // Use new weekly prediction endpoint
-        response = await axios.post(`${API_BASE}/predict_week`, {
-          position,
-          player_ids: validIds,
-          week,
-          season
-        });
-
-        setPredictions(response.data.predictions.map(p => ({
-          PlayerName: p.player_name,
-          PredictedPoints: p.predicted_points,
-          ConfidenceLow: p.confidence_low,
-          ConfidenceHigh: p.confidence_high,
-          features: p.features
-        })));
-      } else {
-        // Fall back to legacy endpoint
-        const selectedPlayers = validIds.map(id => {
-          const player = players.find(p => p.player_id === id || p.PlayerName === id);
-          return player || { PlayerName: id };
-        });
-
-        response = await axios.post(`${API_BASE}/predict`, {
-          position,
-          players: selectedPlayers,
-          use_ensemble: false
-        });
-
-        setPredictions(response.data);
-      }
+      setPredictions(response.data.predictions.map(p => ({
+        PlayerName: p.player_name,
+        PredictedPoints: p.predicted_points,
+        ConfidenceLow: p.confidence_low,
+        ConfidenceHigh: p.confidence_high,
+        features: p.features
+      })));
     } catch (error) {
       console.error('Error fetching predictions:', error);
       setError(error.response?.data?.error || 'Failed to get predictions.');
@@ -266,7 +232,7 @@ const App = () => {
               <div>
                 <h1 className="text-xl font-bold text-white">Fantasy Football Predictor</h1>
                 <p className="text-sm text-slate-400">
-                  {useLegacy ? 'Legacy Mode' : `Week ${week} Predictions`}
+                  {`Week ${week} Predictions`}
                 </p>
               </div>
             </div>
@@ -278,7 +244,7 @@ const App = () => {
                 </Badge>
               ) : (
                 <Badge variant="outline" className="text-yellow-500 border-yellow-500">
-                  Legacy Mode
+                  Model Unavailable
                 </Badge>
               )}
             </div>
@@ -288,40 +254,38 @@ const App = () => {
 
       <main className="container mx-auto px-4 py-8">
         {/* Week Selection (only for new system) */}
-        {!useLegacy && (
-          <Card className="mb-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-white flex items-center gap-2">
-                <CalendarIcon />
-                Prediction Week
-              </CardTitle>
-              <CardDescription className="text-slate-400">
-                Select the NFL week you want predictions for
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-4">
-                <Select value={week.toString()} onValueChange={(v) => setWeek(parseInt(v))}>
-                  <SelectTrigger className="w-48 bg-slate-700/50 border-slate-600 text-white">
-                    <SelectValue placeholder="Select week" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-slate-800 border-slate-700">
-                    {availableWeeks.map((w) => (
-                      <SelectItem
-                        key={w.week}
-                        value={w.week.toString()}
-                        className="text-white hover:bg-slate-700"
-                      >
-                        Week {w.week} {w.players > 0 ? `(${w.players} players)` : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <span className="text-slate-400">Season {season}</span>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+        <Card className="mb-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-white flex items-center gap-2">
+              <CalendarIcon />
+              Prediction Week
+            </CardTitle>
+            <CardDescription className="text-slate-400">
+              Select the NFL week you want predictions for
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-4">
+              <Select value={week.toString()} onValueChange={(v) => setWeek(parseInt(v))}>
+                <SelectTrigger className="w-48 bg-slate-700/50 border-slate-600 text-white">
+                  <SelectValue placeholder="Select week" />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-700">
+                  {availableWeeks.map((w) => (
+                    <SelectItem
+                      key={w.week}
+                      value={w.week.toString()}
+                      className="text-white hover:bg-slate-700"
+                    >
+                      Week {w.week} {w.players > 0 ? `(${w.players} players)` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <span className="text-slate-400">Season {season}</span>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Position Selection */}
         <Card className="mb-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
@@ -410,8 +374,8 @@ const App = () => {
                     className="w-full border-dashed border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
                   >
                     <PlusIcon />
-                    <span className="ml-2">Add Player</span>
-                  </Button>
+                <span className="ml-2">Add Player</span>
+              </Button>
 
                   <Separator className="bg-slate-700" />
 
@@ -558,15 +522,15 @@ const App = () => {
             <div className="flex flex-wrap items-center justify-center gap-4 text-sm text-slate-400">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                <span>{useLegacy ? 'Legacy XGBoost' : 'Phase 4 Weekly Predictor'}</span>
+                <span>Weekly Predictor</span>
               </div>
               <Separator orientation="vertical" className="h-4 bg-slate-700" />
               <div className="flex items-center gap-2">
-                <span>{useLegacy ? '14 Features' : '22 Predictive Features'}</span>
+                <span>Reliability + Matchup Features</span>
               </div>
               <Separator orientation="vertical" className="h-4 bg-slate-700" />
               <div className="flex items-center gap-2">
-                <span>{useLegacy ? 'Same-Game Data' : 'Rolling Averages + Matchups'}</span>
+                <span>Rolling Averages + Matchups</span>
               </div>
             </div>
           </CardContent>

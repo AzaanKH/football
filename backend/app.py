@@ -1,11 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sqlite3
-import pandas as pd
-import pickle
 import os
 import logging
-from dataclasses import asdict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,186 +53,6 @@ except Exception as e:
 app = Flask(__name__)
 CORS(app)
 
-# Feature columns used by models
-feature_columns = ['PassingYDS', 'PassingTD', 'PassingInt', 'RushingYDS', 'RushingTD',
-                   'ReceivingRec', 'ReceivingYDS', 'ReceivingTD', 'Fum', 'TouchCarries',
-                   'TouchReceptions', 'Targets', 'RzTouch', 'Rank']
-
-# Load legacy single models
-with open('rb_model.pkl', 'rb') as f:
-    rb_model = pickle.load(f)
-
-with open('qb_model.pkl', 'rb') as f:
-    qb_model = pickle.load(f)
-
-with open('wr_model.pkl', 'rb') as f:
-    wr_model = pickle.load(f)
-
-# Try to load ensemble models (Phase 3)
-ensemble_models = {}
-ENSEMBLE_AVAILABLE = False
-
-try:
-    from ensemble_models import EnsemblePredictor
-
-    ensemble_dir = 'models'
-    for position in ['qb', 'rb', 'wr']:
-        model_path = os.path.join(ensemble_dir, f'{position}_ensemble.pkl')
-        if os.path.exists(model_path):
-            ensemble_models[position] = EnsemblePredictor.load(model_path)
-            logger.info(f"Loaded ensemble model for {position.upper()}")
-
-    if ensemble_models:
-        ENSEMBLE_AVAILABLE = True
-        logger.info(f"Ensemble models available for: {list(ensemble_models.keys())}")
-except ImportError as e:
-    logger.warning(f"Ensemble models not available: {e}")
-except Exception as e:
-    logger.warning(f"Failed to load ensemble models: {e}")
-
-
-def connect_db():
-    conn = sqlite3.connect('football_season.db')
-    return conn
-
-
-def fetch_players_from_db(position):
-    conn = connect_db()
-    cursor = conn.cursor()
-
-    if position == "wr":
-        cursor.execute("SELECT * FROM wide_receivers")
-    elif position == "rb":
-        cursor.execute("SELECT * FROM running_backs")
-    elif position == "qb":
-        cursor.execute("SELECT * FROM quarterbacks")
-    else:
-        return []
-
-    players = cursor.fetchall()
-    columns = [column[0] for column in cursor.description]
-    conn.close()
-
-
-    return [dict(zip(columns, player)) for player in players]
-
-
-@app.route('/get_players/<position>', methods=['GET'])
-def get_players(position):
-    players = fetch_players_from_db(position)
-    return jsonify(players)
-
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    """
-    Make predictions for players.
-
-    Request body:
-        position: 'qb', 'rb', or 'wr'
-        players: list of player objects with stats
-        use_ensemble: (optional) boolean, use ensemble model if available
-
-    Returns:
-        List of top 10 players with predicted points
-    """
-    data = request.json
-    position = data.get('position')
-    players = data.get('players')
-    use_ensemble = data.get('use_ensemble', ENSEMBLE_AVAILABLE)
-
-    df = pd.DataFrame(players)
-
-    for col in feature_columns:
-        if col not in df.columns:
-            df[col] = 0
-
-    for col in feature_columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # Use ensemble if available and requested
-    if use_ensemble and position in ensemble_models:
-        predictions = ensemble_models[position].predict(df[feature_columns])
-        logger.info(f"Using ensemble model for {position}")
-    else:
-        # Fall back to legacy single model
-        if position == 'rb':
-            predictions = rb_model.predict(df[feature_columns])
-        elif position == 'qb':
-            predictions = qb_model.predict(df[feature_columns])
-        elif position == 'wr':
-            predictions = wr_model.predict(df[feature_columns])
-        else:
-            return jsonify({'error': 'Invalid position'}), 400
-
-    df['PredictedPoints'] = predictions
-    df['PlayerName'] = [player['PlayerName'] for player in players]
-
-    top_players = df.sort_values(by='PredictedPoints', ascending=False).head(10)
-
-    return jsonify(top_players.to_dict(orient='records'))
-
-
-@app.route('/predict_ensemble', methods=['POST'])
-def predict_ensemble():
-    """
-    Make predictions with confidence intervals using ensemble model.
-
-    Request body:
-        position: 'qb', 'rb', or 'wr'
-        players: list of player objects with stats
-        include_model_details: (optional) boolean, include individual model predictions
-
-    Returns:
-        List of players with predicted points, confidence intervals, and optionally model details
-    """
-    if not ENSEMBLE_AVAILABLE:
-        return jsonify({'error': 'Ensemble models not available. Train with: python ensemble_models.py train'}), 503
-
-    data = request.json
-    position = data.get('position')
-    players = data.get('players')
-    include_details = data.get('include_model_details', False)
-
-    if position not in ensemble_models:
-        return jsonify({'error': f'Ensemble model not available for position: {position}'}), 404
-
-    df = pd.DataFrame(players)
-
-    for col in feature_columns:
-        if col not in df.columns:
-            df[col] = 0
-
-    for col in feature_columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # Get predictions with confidence intervals
-    results = ensemble_models[position].predict_with_confidence(df[feature_columns])
-
-    # Build response
-    response = []
-    for i, player in enumerate(players):
-        result = results[i]
-        player_result = {
-            'PlayerName': player.get('PlayerName', f'Player_{i}'),
-            'PredictedPoints': round(result.prediction, 2),
-            'ConfidenceLow': round(result.confidence_low, 2),
-            'ConfidenceHigh': round(result.confidence_high, 2)
-        }
-
-        if include_details:
-            player_result['ModelPredictions'] = {
-                name: round(pred, 2)
-                for name, pred in result.model_predictions.items()
-            }
-
-        response.append(player_result)
-
-    # Sort by predicted points
-    response.sort(key=lambda x: x['PredictedPoints'], reverse=True)
-
-    return jsonify(response[:10])
-
 
 @app.route('/model_status', methods=['GET'])
 def model_status():
@@ -247,23 +63,9 @@ def model_status():
         Dictionary with model availability and metrics
     """
     status = {
-        'legacy_models': {
-            'qb': True,
-            'rb': True,
-            'wr': True
-        },
-        'ensemble_available': ENSEMBLE_AVAILABLE,
-        'ensemble_models': {},
         'weekly_predictor_available': WEEKLY_PREDICTOR_AVAILABLE,
         'postgres_available': POSTGRES_AVAILABLE
     }
-
-    for position, model in ensemble_models.items():
-        status['ensemble_models'][position] = {
-            'trained': model._is_trained,
-            'models': list(model.models.keys()),
-            'metrics': model.training_metrics
-        }
 
     if WEEKLY_PREDICTOR_AVAILABLE and weekly_predictor:
         status['weekly_predictor'] = {

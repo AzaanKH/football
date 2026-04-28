@@ -42,7 +42,7 @@ Compare players with predicted points, confidence ranges, and 3-game averages.
 
 ## Backend Overview
 
-The current backend has a newer weekly prediction system alongside older legacy model code.
+The backend now serves a single weekly prediction system built on Postgres feature engineering and position-specific XGBoost models.
 
 - The current weekly prediction API is `POST /predict_week`
 - The newer pipeline stores player data, stats, projections, features, and matchup context in Postgres
