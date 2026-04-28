@@ -14,9 +14,9 @@ CREATE TABLE IF NOT EXISTS players (
     last_name VARCHAR(50),
     position VARCHAR(10),
     team VARCHAR(5),
-    status VARCHAR(20),
-    injury_status VARCHAR(50),
-    injury_body_part VARCHAR(50),
+    status VARCHAR(100),
+    injury_status VARCHAR(100),
+    injury_body_part VARCHAR(100),
     years_exp INTEGER,
     age INTEGER,
     height VARCHAR(10),
@@ -116,6 +116,24 @@ CREATE TABLE IF NOT EXISTS team_defense_stats (
     CONSTRAINT unique_team_week UNIQUE (team, season, week)
 );
 
+-- Team matchup context for weekly feature generation
+CREATE TABLE IF NOT EXISTS team_weekly_matchups (
+    id SERIAL PRIMARY KEY,
+    season INTEGER NOT NULL,
+    week INTEGER NOT NULL,
+    team VARCHAR(5) NOT NULL,
+    opponent VARCHAR(5),
+    is_home BOOLEAN,
+    game_date TIMESTAMPTZ,
+    source VARCHAR(20) DEFAULT 'espn',
+    created_at TIMESTAMP DEFAULT NOW(),
+
+    CONSTRAINT unique_team_matchup UNIQUE (season, week, team)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_weekly_matchups_lookup
+    ON team_weekly_matchups(season, week, team);
+
 -- Projections table (for storing external projections)
 CREATE TABLE IF NOT EXISTS player_projections (
     id SERIAL PRIMARY KEY,
@@ -190,6 +208,13 @@ CREATE TABLE IF NOT EXISTS player_features (
     targets_avg_3 DECIMAL(10,2),
     touches_avg_3 DECIMAL(10,2),
     receptions_avg_3 DECIMAL(10,2),
+    games_played_prior INTEGER,
+    current_season_games_played INTEGER,
+    has_prev_season_data BOOLEAN,
+    has_full_window_3 BOOLEAN,
+    has_full_window_5 BOOLEAN,
+    has_full_window_10 BOOLEAN,
+    fantasy_pts_baseline DECIMAL(10,2),
 
     -- Efficiency Metrics (7 features)
     yards_per_carry DECIMAL(10,2),

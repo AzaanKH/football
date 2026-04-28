@@ -203,6 +203,22 @@ class TestDataOrchestratorUnit:
             mocks['orchestrator'].sync_projections(2024, 10)
 
     @pytest.mark.unit
+    def test_sync_matchups_success(self, mock_orchestrator):
+        """Test successful matchup sync."""
+        mocks = mock_orchestrator
+        mocks['espn'].get_week_matchups.return_value = [
+            {'team': 'KC', 'opponent': 'BUF', 'is_home': True, 'game_date': None, 'source': 'espn'},
+            {'team': 'BUF', 'opponent': 'KC', 'is_home': False, 'game_date': None, 'source': 'espn'},
+        ]
+        cursor = mocks['db']['cursor']
+        cursor.rowcount = 1
+
+        result = mocks['orchestrator'].sync_matchups(2024, 10)
+
+        assert result['processed'] == 2
+        mocks['espn'].get_week_matchups.assert_called_once_with(2024, 10)
+
+    @pytest.mark.unit
     def test_get_current_season_info_success(self, mock_orchestrator, sample_nfl_state):
         """Test getting current season info."""
         mocks = mock_orchestrator
@@ -234,6 +250,10 @@ class TestDataOrchestratorUnit:
         mocks['sleeper'].get_all_players.return_value = sample_sleeper_players
         mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
         mocks['sleeper'].get_weekly_projections.return_value = sample_projections
+        mocks['espn'].get_week_matchups.return_value = [
+            {'team': 'KC', 'opponent': 'BUF', 'is_home': True, 'game_date': None, 'source': 'espn'},
+            {'team': 'BUF', 'opponent': 'KC', 'is_home': False, 'game_date': None, 'source': 'espn'},
+        ]
         mocks['sleeper'].get_nfl_state.return_value = sample_nfl_state
         cursor = mocks['db']['cursor']
         cursor.rowcount = 1
@@ -241,6 +261,7 @@ class TestDataOrchestratorUnit:
         result = mocks['orchestrator'].full_sync(season=2024, current_week=10)
 
         assert result['players'] is not None
+        assert result['matchups'] is not None
         assert result['projections'] is not None
         assert len(result['errors']) == 0
 
@@ -252,6 +273,10 @@ class TestDataOrchestratorUnit:
         mocks['sleeper'].get_all_players.return_value = sample_sleeper_players
         mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
         mocks['sleeper'].get_weekly_projections.return_value = sample_projections
+        mocks['espn'].get_week_matchups.return_value = [
+            {'team': 'KC', 'opponent': 'BUF', 'is_home': True, 'game_date': None, 'source': 'espn'},
+            {'team': 'BUF', 'opponent': 'KC', 'is_home': False, 'game_date': None, 'source': 'espn'},
+        ]
         cursor = mocks['db']['cursor']
         cursor.rowcount = 1
 
@@ -259,8 +284,9 @@ class TestDataOrchestratorUnit:
             season=2024, current_week=5, sync_historical=True
         )
 
-        # Should sync weeks 1-5
-        assert len(result['stats']) == 5
+        # Should sync finalized weeks 1-4 and prep week 5 context
+        assert len(result['stats']) == 4
+        assert result['matchups'] is not None
 
     @pytest.mark.unit
     def test_full_sync_partial_failure(self, mock_orchestrator, sample_sleeper_players):
@@ -269,6 +295,7 @@ class TestDataOrchestratorUnit:
         mocks['sleeper'].get_all_players.return_value = sample_sleeper_players
         mocks['sleeper'].get_weekly_stats.side_effect = Exception("Stats API down")
         mocks['sleeper'].get_weekly_projections.return_value = {}
+        mocks['espn'].get_week_matchups.return_value = []
         cursor = mocks['db']['cursor']
         cursor.rowcount = 1
 

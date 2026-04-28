@@ -48,7 +48,7 @@ class EfficiencyMetrics:
             'td_per_pass_attempt': None,
         }
 
-        # Get season-to-date totals
+        # Get season-to-date totals, falling back to recent prior-season data
         totals = self._get_season_totals(player_id, season, week)
 
         if not totals:
@@ -126,7 +126,40 @@ class EfficiencyMetrics:
         self.cursor.execute(query, (player_id, season, week))
         row = self.cursor.fetchone()
 
-        if not row or row[10] == 0:  # games_played is last column
+        if row and row[10] > 0:  # games_played is last column
+            columns = [
+                'passing_attempts', 'passing_yards', 'passing_tds',
+                'rushing_attempts', 'rushing_yards', 'rushing_tds',
+                'targets', 'receptions', 'receiving_yards', 'receiving_tds',
+                'games_played'
+            ]
+            return dict(zip(columns, row))
+
+        history_query = """
+            SELECT
+                COALESCE(SUM(passing_attempts), 0) as passing_attempts,
+                COALESCE(SUM(passing_yards), 0) as passing_yards,
+                COALESCE(SUM(passing_tds), 0) as passing_tds,
+                COALESCE(SUM(rushing_attempts), 0) as rushing_attempts,
+                COALESCE(SUM(rushing_yards), 0) as rushing_yards,
+                COALESCE(SUM(rushing_tds), 0) as rushing_tds,
+                COALESCE(SUM(targets), 0) as targets,
+                COALESCE(SUM(receptions), 0) as receptions,
+                COALESCE(SUM(receiving_yards), 0) as receiving_yards,
+                COALESCE(SUM(receiving_tds), 0) as receiving_tds,
+                COUNT(*) as games_played
+            FROM (
+                SELECT *
+                FROM player_weekly_stats
+                WHERE player_id = %s
+                  AND ((season = %s AND week < %s) OR season < %s)
+                ORDER BY season DESC, week DESC
+                LIMIT 10
+            ) recent_games
+        """
+        self.cursor.execute(history_query, (player_id, season, week, season))
+        row = self.cursor.fetchone()
+        if not row or row[10] == 0:
             return None
 
         columns = [

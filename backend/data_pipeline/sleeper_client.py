@@ -236,6 +236,14 @@ def _safe_str(value) -> Optional[str]:
     return str(value)
 
 
+def _bounded_str(value, max_length: int) -> Optional[str]:
+    """Convert to string and truncate to a schema-safe maximum length."""
+    converted = _safe_str(value)
+    if converted is None:
+        return None
+    return converted[:max_length]
+
+
 def transform_player_data(sleeper_player: Dict) -> Dict:
     """
     Transform Sleeper player data to our database schema.
@@ -252,16 +260,16 @@ def transform_player_data(sleeper_player: Dict) -> Dict:
         'full_name': sleeper_player.get('full_name') or '',
         'first_name': sleeper_player.get('first_name') or '',
         'last_name': sleeper_player.get('last_name') or '',
-        'position': _safe_str(sleeper_player.get('position')),
-        'team': _safe_str(sleeper_player.get('team')),
-        'status': _safe_str(sleeper_player.get('status')),
-        'injury_status': _safe_str(sleeper_player.get('injury_status')),
-        'injury_body_part': _safe_str(sleeper_player.get('injury_body_part')),
+        'position': _bounded_str(sleeper_player.get('position'), 10),
+        'team': _bounded_str(sleeper_player.get('team'), 5),
+        'status': _bounded_str(sleeper_player.get('status'), 100),
+        'injury_status': _bounded_str(sleeper_player.get('injury_status'), 100),
+        'injury_body_part': _bounded_str(sleeper_player.get('injury_body_part'), 100),
         'years_exp': _safe_int(sleeper_player.get('years_exp')),
         'age': _safe_int(sleeper_player.get('age')),
-        'height': _safe_str(sleeper_player.get('height')),
+        'height': _bounded_str(sleeper_player.get('height'), 10),
         'weight': _safe_int(sleeper_player.get('weight')),
-        'college': _safe_str(sleeper_player.get('college')),
+        'college': _bounded_str(sleeper_player.get('college'), 100),
         'fantasy_positions': sleeper_player.get('fantasy_positions') or []
     }
 

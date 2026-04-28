@@ -49,6 +49,13 @@ class RollingAverages:
             'targets_avg_3': None,
             'touches_avg_3': None,
             'receptions_avg_3': None,
+            'games_played_prior': 0,
+            'current_season_games_played': 0,
+            'has_prev_season_data': False,
+            'has_full_window_3': False,
+            'has_full_window_5': False,
+            'has_full_window_10': False,
+            'fantasy_pts_baseline': None,
         }
 
         # Get historical stats for this player (prior weeks only)
@@ -58,6 +65,15 @@ class RollingAverages:
             return features
 
         # Compute rolling averages
+        current_season_games = sum(1 for s in stats if s.get('season') == season)
+        previous_season_games = len(stats) - current_season_games
+        features['games_played_prior'] = len(stats)
+        features['current_season_games_played'] = current_season_games
+        features['has_prev_season_data'] = previous_season_games > 0
+        features['has_full_window_3'] = len(stats) >= 3
+        features['has_full_window_5'] = len(stats) >= 5
+        features['has_full_window_10'] = len(stats) >= 10
+
         features['fantasy_pts_avg_3'] = self._rolling_avg(stats, 'fantasy_points_ppr', 3)
         features['fantasy_pts_avg_5'] = self._rolling_avg(stats, 'fantasy_points_ppr', 5)
         features['fantasy_pts_avg_10'] = self._rolling_avg(stats, 'fantasy_points_ppr', 10)
@@ -66,9 +82,10 @@ class RollingAverages:
         features['passing_yds_avg_3'] = self._rolling_avg(stats, 'passing_yards', 3)
         features['targets_avg_3'] = self._rolling_avg(stats, 'targets', 3)
         features['receptions_avg_3'] = self._rolling_avg(stats, 'receptions', 3)
+        features['fantasy_pts_baseline'] = self._blended_baseline(stats, season)
 
         # Touches = rushing_attempts + receptions
-        if len(stats) >= 3:
+        if stats:
             touches = []
             for s in stats[-3:]:
                 touch = (s.get('rushing_attempts') or 0) + (s.get('receptions') or 0)
@@ -140,6 +157,40 @@ class RollingAverages:
         values = [s.get(field) or 0 for s in recent]
         return Decimal(str(round(sum(values) / len(values), 2)))
 
+    def _blended_baseline(self, stats: List[Dict], season: int, prior_weight: int = 3) -> Optional[Decimal]:
+        """
+        Blend current-season form with prior-season history for early-season stability.
+
+        The current season contributes its available games. Prior seasons act as a
+        shrinkage prior so week 1-3 predictions do not collapse toward zero.
+        """
+        current_values = [
+            float(s.get('fantasy_points_ppr') or 0)
+            for s in stats
+            if s.get('season') == season
+        ]
+        prior_values = [
+            float(s.get('fantasy_points_ppr') or 0)
+            for s in stats
+            if s.get('season') != season
+        ]
+
+        if current_values and prior_values:
+            current_avg = sum(current_values) / len(current_values)
+            prior_avg = sum(prior_values[-5:]) / len(prior_values[-5:])
+            blended = ((len(current_values) * current_avg) + (prior_weight * prior_avg)) / (
+                len(current_values) + prior_weight
+            )
+            return Decimal(str(round(blended, 2)))
+
+        if current_values:
+            return Decimal(str(round(sum(current_values) / len(current_values), 2)))
+
+        if prior_values:
+            return Decimal(str(round(sum(prior_values[-5:]) / len(prior_values[-5:]), 2)))
+
+        return None
+
     def compute_batch(self, player_ids: List[str], season: int, week: int) -> Dict[str, Dict]:
         """
         Compute rolling averages for multiple players efficiently.
@@ -161,6 +212,9 @@ class RollingAverages:
                 results[player_id] = {k: None for k in [
                     'fantasy_pts_avg_3', 'fantasy_pts_avg_5', 'fantasy_pts_avg_10',
                     'rushing_yds_avg_3', 'receiving_yds_avg_3', 'passing_yds_avg_3',
-                    'targets_avg_3', 'touches_avg_3', 'receptions_avg_3'
+                    'targets_avg_3', 'touches_avg_3', 'receptions_avg_3',
+                    'games_played_prior', 'current_season_games_played', 'has_prev_season_data',
+                    'has_full_window_3', 'has_full_window_5', 'has_full_window_10',
+                    'fantasy_pts_baseline'
                 ]}
         return results

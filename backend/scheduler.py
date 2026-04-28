@@ -7,7 +7,8 @@ Uses APScheduler to run data sync and feature computation on a schedule.
 
 Schedule:
 - Player sync: Daily at 6:00 AM
-- Stats sync: Tuesday 6:00 AM (after Monday Night Football)
+- Completed-week stats sync: Tuesday 6:00 AM (after Monday Night Football)
+- Upcoming-week context sync: Tuesday 6:30 AM
 - Feature computation: Tuesday 7:00 AM
 - Model retraining: Tuesday 8:00 AM (optional)
 
@@ -80,6 +81,42 @@ def get_current_nfl_week() -> tuple:
     return SEASON, 1
 
 
+def resolve_pipeline_context(season: Optional[int] = None, nfl_week: Optional[int] = None) -> dict:
+    """
+    Resolve explicit completed and prediction weeks for weekly automation.
+
+    The scheduler runs on Tuesday morning, so Sleeper's current week is treated
+    as the upcoming prediction week and the completed stats week is one prior.
+    """
+    if season is None or nfl_week is None:
+        season, nfl_week = get_current_nfl_week()
+
+    prediction_week = max(1, nfl_week)
+    completed_week = max(0, prediction_week - 1)
+    weeks_to_refresh = [w for w in {completed_week - 1, completed_week} if w >= 1]
+
+    return {
+        'season': season,
+        'nfl_week': nfl_week,
+        'prediction_week': prediction_week,
+        'completed_week': completed_week,
+        'weeks_to_refresh': sorted(weeks_to_refresh),
+        'is_offseason': nfl_week == 0,
+    }
+
+
+def _skipped(reason: str, **extra) -> dict:
+    """Standardize skipped job responses for run-now reporting."""
+    payload = {'skipped': True, 'reason': reason}
+    payload.update(extra)
+    return payload
+
+
+def _is_offseason(context: dict) -> bool:
+    """Handle older or mocked contexts that may not include the new flag."""
+    return context.get('is_offseason', context.get('nfl_week', 1) == 0)
+
+
 def job_sync_players():
     """Scheduled job: Sync players from Sleeper API."""
     logger.info("Starting scheduled player sync...")
@@ -104,15 +141,28 @@ def job_sync_weekly_stats():
     try:
         from data_pipeline import DataOrchestrator
 
-        season, week = get_current_nfl_week()
-        logger.info(f"Syncing stats for {season} Week {week}")
+        context = resolve_pipeline_context()
+        season = context['season']
+        completed_week = context['completed_week']
+        if not context['weeks_to_refresh']:
+            logger.info(
+                f"No completed weeks to refresh for {season} "
+                f"(nfl_week={context['nfl_week']}, offseason={_is_offseason(context)})"
+            )
+            return _skipped(
+                "No completed NFL weeks are available to sync yet",
+                season=season,
+                completed_week=completed_week,
+            )
+
+        logger.info(
+            f"Syncing finalized stats for {season}: completed week {completed_week}, "
+            f"refresh weeks {context['weeks_to_refresh']}"
+        )
 
         with DataOrchestrator() as orchestrator:
-            # Sync current week and previous week (for any late updates)
-            weeks_to_sync = [max(1, week - 1), week] if week > 1 else [week]
-
             results = {}
-            for w in weeks_to_sync:
+            for w in context['weeks_to_refresh']:
                 try:
                     stats = orchestrator.sync_weekly_stats(season, w)
                     results[w] = stats
@@ -127,6 +177,35 @@ def job_sync_weekly_stats():
         raise
 
 
+def job_sync_prediction_context():
+    """Scheduled job: Sync matchups and projections for the upcoming prediction week."""
+    logger.info("Starting scheduled prediction-context sync...")
+
+    try:
+        from data_pipeline import DataOrchestrator
+
+        context = resolve_pipeline_context()
+        season = context['season']
+        prediction_week = context['prediction_week']
+        if _is_offseason(context):
+            logger.info(f"Skipping matchup/projection sync for {season}: offseason")
+            return _skipped(
+                "Offseason detected; matchup and projection feeds are not available",
+                season=season,
+                prediction_week=prediction_week,
+            )
+        logger.info(f"Syncing matchups and projections for {season} Week {prediction_week}")
+
+        with DataOrchestrator() as orchestrator:
+            return {
+                'matchups': orchestrator.sync_matchups(season, prediction_week),
+                'projections': orchestrator.sync_projections(season, prediction_week),
+            }
+    except Exception as e:
+        logger.error(f"Prediction-context sync failed: {e}")
+        raise
+
+
 def job_compute_features():
     """Scheduled job: Compute features for current week."""
     logger.info("Starting scheduled feature computation...")
@@ -134,20 +213,23 @@ def job_compute_features():
     try:
         from data_pipeline.features import FeatureEngineer
 
-        season, week = get_current_nfl_week()
-
-        # Can only compute features starting week 2 (need prior data)
-        if week < 2:
-            logger.info("Week 1 - skipping feature computation (need prior data)")
-            return None
-
-        logger.info(f"Computing features for {season} Week {week}")
+        context = resolve_pipeline_context()
+        season = context['season']
+        prediction_week = context['prediction_week']
+        if _is_offseason(context):
+            logger.info(f"Skipping feature computation for {season}: offseason")
+            return _skipped(
+                "Offseason detected; no prediction week feature build is needed",
+                season=season,
+                prediction_week=prediction_week,
+            )
+        logger.info(f"Computing features for {season} Week {prediction_week}")
 
         conn = get_db_connection()
         try:
             with FeatureEngineer(conn) as engineer:
                 stats = engineer.compute_all_features(
-                    season, week,
+                    season, prediction_week,
                     positions=['QB', 'RB', 'WR', 'TE']
                 )
                 logger.info(f"Features computed: {stats['total']} players, "
@@ -234,6 +316,16 @@ class FantasyScheduler:
             CronTrigger(day_of_week='tue', hour=6, minute=0),
             id='sync_stats',
             name='Weekly Stats Sync',
+            replace_existing=True,
+            max_instances=1
+        )
+
+        # Tuesday matchup/projection sync at 6:30 AM ET
+        self.scheduler.add_job(
+            job_sync_prediction_context,
+            CronTrigger(day_of_week='tue', hour=6, minute=30),
+            id='sync_prediction_context',
+            name='Weekly Prediction Context Sync',
             replace_existing=True,
             max_instances=1
         )
@@ -340,6 +432,12 @@ def run_all_jobs_now(sync_only=False, features_only=False, train_only=False):
         except Exception as e:
             results['stats'] = {'error': str(e)}
 
+        print("\n2b. Syncing upcoming-week context...")
+        try:
+            results['prediction_context'] = job_sync_prediction_context()
+        except Exception as e:
+            results['prediction_context'] = {'error': str(e)}
+
     if features_only:
         print("\n3. Computing features...")
         try:
@@ -359,7 +457,9 @@ def run_all_jobs_now(sync_only=False, features_only=False, train_only=False):
     print("=" * 60)
 
     for job, result in results.items():
-        if result and 'error' not in result:
+        if result and result.get('skipped'):
+            print(f"  {job}: Skipped - {result.get('reason', 'No action needed')}")
+        elif result and 'error' not in result:
             print(f"  {job}: Success")
         else:
             print(f"  {job}: Failed - {result.get('error', 'Unknown error')}")
@@ -378,6 +478,7 @@ def main():
         print("  python scheduler.py run-now --features # Only compute features")
         print("  python scheduler.py run-now --train    # Only retrain model")
         print("  python scheduler.py status             # Show scheduler status")
+        print("  python scheduler.py dry-run            # Show resolved weekly trigger context")
         return
 
     command = sys.argv[1].lower()
@@ -416,6 +517,12 @@ def main():
                 print(f"    Next Run: {job['next_run'] or 'Not scheduled'}")
         else:
             print("APScheduler not installed")
+
+    elif command == 'dry-run':
+        context = resolve_pipeline_context()
+        print("\nWeekly Trigger Context:")
+        for key, value in context.items():
+            print(f"  {key}: {value}")
 
     else:
         print(f"Unknown command: {command}")

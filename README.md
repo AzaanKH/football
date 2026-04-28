@@ -1,16 +1,16 @@
 # Fantasy Football Predictor
 
-A machine learning-powered fantasy football prediction application that helps you make start/sit decisions for your weekly lineup. The app uses XGBoost models trained on historical NFL data to predict player fantasy points with confidence intervals.
+A machine learning-powered fantasy football prediction application for weekly start/sit decisions. The current backend uses separate XGBoost models by position and trains on historical NFL data with rolling features, reliability flags, and matchup context.
 
 ## Features
 
 - **Position-based predictions** for Quarterbacks, Running Backs, and Wide Receivers
-- **Searchable player dropdown** with type-to-filter functionality
-- **Confidence intervals** showing prediction range (low-high)
-- **3-game averages** for historical context
-- **Ranked predictions** with medal-style display (gold, silver, bronze)
-- **Real-time data** from Sleeper Fantasy API
-- **Dark theme** with modern glassmorphism design
+- **Position-specific models** so QB/RB/WR data stays separated
+- **Confidence intervals** for weekly predictions
+- **Early-season aware features** with reliability flags and prior-season blending
+- **Weekly matchup context** sourced from ESPN scoreboard data
+- **Searchable player dropdown** in the frontend
+- **Local-first workflow** with Docker Desktop + TimescaleDB/Postgres
 
 ## Screenshots
 
@@ -34,38 +34,20 @@ Compare players with predicted points, confidence ranges, and 3-game averages.
 
 ## Architecture
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   React App     │────▶  Flask API        ────▶  PostgreSQL      │
-│   (Port 3000)   │     │  (Port 5001)     │     │  (TimescaleDB)  │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌──────────────────┐
-                        │  XGBoost Model   │
-                        │  (22 Features)   │
-                        └──────────────────┘
-```
+- **Frontend**: React + shadcn/ui in `frontend/fantasy-football/`
+- **API**: Flask backend in `backend/app.py`
+- **Database**: PostgreSQL + TimescaleDB in Docker Desktop
+- **Data Pipeline**: Sleeper + ESPN integrations in `backend/data_pipeline/`
+- **Models**: Position-specific XGBoost weekly predictor in `backend/weekly_predictor.py`
 
-**Backend (Python/Flask)** - `backend/`
+## Backend Overview
 
-- Flask REST API with CORS
-- XGBoost weekly predictor model
-- PostgreSQL + TimescaleDB for player data
-- 22 predictive features (rolling averages, efficiency, matchups)
+The current backend has a newer weekly prediction system alongside older legacy model code.
 
-**Frontend (React + shadcn/ui)** - `frontend/fantasy-football/`
-
-- Create React App with Tailwind CSS
-- shadcn/ui component library
-- Searchable combobox for player selection
-- Responsive two-column layout
-
-**Data Pipeline** - `backend/data_pipeline/`
-
-- Sleeper API client for NFL player data
-- Feature engineering (rolling averages, efficiency metrics)
-- Automated weekly data sync
+- The current weekly prediction API is `POST /predict_week`
+- The newer pipeline stores player data, stats, projections, features, and matchup context in Postgres
+- Feature engineering now includes reliability-aware early-season handling
+- Training now uses temporal splits and supports walk-forward backtesting
 
 ## Quick Start
 
@@ -73,16 +55,16 @@ Compare players with predicted points, confidence ranges, and 3-game averages.
 
 - Python 3.8+
 - Node.js 16+
-- Docker (for PostgreSQL)
+- Docker Desktop
 
-### 1. Start Database
+### 1. Start the database
 
 ```bash
 cd backend
 docker-compose up -d
 ```
 
-### 2. Setup Backend
+### 2. Setup the backend
 
 ```bash
 cd backend
@@ -90,24 +72,43 @@ cd backend
 # Create virtual environment
 python -m venv venv
 
-# Activate (Windows)
+# Activate on Windows
 venv\Scripts\activate
 
-# Activate (Mac/Linux)
+# Activate on Mac/Linux
 source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 pip install -r requirements_data_pipeline.txt
+```
 
-# Run automated setup (syncs data + trains model)
+### 3. Apply migrations if your database already existed
+
+If your `football_dev` database was created before the newer feature and matchup changes, apply the migrations manually.
+
+PowerShell:
+
+```powershell
+Get-Content .\migrations\002_add_matchups_and_reliability_features.sql | docker exec -i football-db psql -U postgres -d football_dev
+Get-Content .\migrations\003_expand_player_status_columns.sql | docker exec -i football-db psql -U postgres -d football_dev
+```
+
+### 4. Run initial setup
+
+```bash
+cd backend
 python setup_2025_season.py
+```
 
-# Start server
+### 5. Start the backend API
+
+```bash
+cd backend
 python app.py
 ```
 
-### 3. Setup Frontend
+### 6. Start the frontend
 
 ```bash
 cd frontend/fantasy-football
@@ -115,9 +116,72 @@ npm install
 npm start
 ```
 
-### 4. Open App
+### 7. Open the app
 
 Navigate to <http://localhost:3000>
+
+## Local Workflow
+
+This project is designed to run fully locally.
+
+- Docker Desktop runs PostgreSQL + TimescaleDB
+- the Flask backend runs locally
+- the React frontend runs locally
+- `scheduler.py` can be run locally to automate weekly sync/training
+
+You do not need to host the app for the scheduler to work.
+
+## Scheduler
+
+The scheduler in `backend/scheduler.py` supports two local modes:
+
+### Manual run
+
+```bash
+cd backend
+python scheduler.py run-now
+```
+
+This runs the jobs immediately and exits.
+
+### Long-running local scheduler
+
+```bash
+cd backend
+python scheduler.py start
+```
+
+This starts a local long-lived Python process that waits for scheduled job times. If you close the terminal, the scheduler stops.
+
+### Useful scheduler commands
+
+```bash
+python scheduler.py dry-run
+python scheduler.py run-now
+python scheduler.py run-now --sync
+python scheduler.py run-now --features
+python scheduler.py run-now --train
+python scheduler.py status
+```
+
+`python scheduler.py start` requires `APScheduler` to be installed in the Python environment you are using.
+
+## Offseason Behavior
+
+The weekly scheduler now distinguishes between:
+
+- `completed_week`: the latest finalized stat week
+- `prediction_week`: the upcoming week being prepared for prediction
+
+During the NFL offseason, Sleeper may return `week = 0`. In that case:
+
+- player sync still runs
+- stats sync is skipped cleanly
+- matchup/projection sync is skipped cleanly
+- feature computation is skipped cleanly
+- retraining can still run on historical data
+
+This means `python scheduler.py run-now` is safe to run locally year-round, even when there is no live NFL week to ingest.
 
 ## API Endpoints
 
@@ -128,7 +192,7 @@ Navigate to <http://localhost:3000>
 | `/available_weeks` | GET | Get weeks with computed features |
 | `/model_status` | GET | Check model availability |
 
-### Example: Get Predictions
+### Example prediction request
 
 ```bash
 curl -X POST http://localhost:5001/predict_week \
@@ -141,87 +205,92 @@ curl -X POST http://localhost:5001/predict_week \
   }'
 ```
 
-## Model Performance
+## Predictive Features
 
-| Position | MAE | R² | Top Features |
-|----------|-----|-----|--------------|
-| QB | 3.20 | 0.63 | passing_yds_avg_3, fantasy_pts_avg_3 |
-| RB | 2.99 | 0.53 | touches_avg_3, fantasy_pts_avg_3 |
-| WR | 2.72 | 0.48 | targets_avg_3, receptions_avg_3 |
+- **Rolling Averages**: Fantasy points, rushing/receiving/passing yards over 3, 5, and 10 game views
+- **Reliability Features**: Games played, full-window flags, previous-season availability, blended baseline
+- **Efficiency**: Yards per carry, yards per target, catch rate, touchdown efficiency
+- **Consistency**: Standard deviation, boom rate, bust rate, floor score
+- **Trends**: Short-term fantasy point and usage slopes
+- **Matchup Context**: Opponent, home/away, rest days, opponent defensive context when available
 
-## Predictive Features (22 total)
+## Model Training
 
-- **Rolling Averages**: Fantasy points, rushing/receiving/passing yards (3, 5, 10 games)
-- **Efficiency**: Yards per carry, catch rate, TD per touch
-- **Consistency**: Standard deviation, boom/bust rates, floor score
-- **Trends**: 3-game linear regression slopes
-- **Matchup**: Opponent position rank, home/away
+The current weekly predictor:
 
-## Project Structure
-
-```
-football/
-├── backend/
-│   ├── app.py                 # Flask API server
-│   ├── weekly_predictor.py    # XGBoost prediction model
-│   ├── setup_2025_season.py   # Automated setup script
-│   ├── data_pipeline/         # Data sync and features
-│   │   ├── sleeper_client.py  # Sleeper API client
-│   │   └── features/          # Feature engineering
-│   ├── models/                # Trained model files
-│   └── docker-compose.yml     # PostgreSQL database
-│
-├── frontend/fantasy-football/
-│   ├── src/
-│   │   ├── App.js             # Main React component
-│   │   └── components/ui/     # shadcn/ui components
-│   ├── tailwind.config.js     # Tailwind configuration
-│   └── package.json
-│
-└── docs/images/               # Screenshots
-```
+- trains separate models for `qb`, `rb`, and `wr`
+- uses temporal train/test splitting instead of random row splitting
+- supports walk-forward backtesting
+- saves trained artifacts to `backend/models/weekly_predictor.pkl`
 
 ## Development
 
-### Run Tests
+### Run unit tests
 
 ```bash
 cd backend
-python run_tests.py all
+python run_tests.py unit
 ```
 
-### Retrain Model
+### Backtest a position model
+
+```bash
+cd backend
+python weekly_predictor.py backtest qb
+```
+
+### Retrain the weekly models
 
 ```bash
 cd backend
 python weekly_predictor.py train
 ```
 
-### Sync Latest Data
+### Manual pipeline commands
 
 ```bash
 cd backend
 python run_pipeline.py sync-players
 python run_pipeline.py sync-stats 2025 18
 python run_pipeline.py compute-features 2025 18
+python scheduler.py run-now
+```
+
+## Project Structure
+
+```text
+football/
+├── backend/
+│   ├── app.py
+│   ├── weekly_predictor.py
+│   ├── scheduler.py
+│   ├── setup_2025_season.py
+│   ├── migrations/
+│   ├── data_pipeline/
+│   │   ├── sleeper_client.py
+│   │   ├── espn_client.py
+│   │   └── features/
+│   └── tests/
+├── frontend/fantasy-football/
+└── docs/images/
 ```
 
 ## Tech Stack
 
-**Backend**
+### Backend
 
-- Python 3.8+
+- Python
 - Flask + Flask-CORS
-- XGBoost, scikit-learn
 - PostgreSQL + TimescaleDB
-- pandas, numpy
+- XGBoost
+- pandas / numpy / scikit-learn
+- APScheduler
 
-**Frontend**
+### Frontend
 
 - React 18
 - Tailwind CSS
-- shadcn/ui (Radix UI primitives)
-- cmdk (searchable command menu)
+- shadcn/ui
 - Axios
 
 ## License

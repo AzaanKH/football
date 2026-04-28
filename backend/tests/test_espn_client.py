@@ -154,6 +154,37 @@ class TestESPNClientUnit:
         assert result == scoreboard_data
 
     @pytest.mark.unit
+    def test_get_week_matchups_parses_home_away(self, mock_client):
+        """Test converting scoreboard events into per-team matchup rows."""
+        client, http_mock = mock_client
+
+        scoreboard_data = {
+            'events': [{
+                'date': '2024-09-08T17:00Z',
+                'competitions': [{
+                    'competitors': [
+                        {'homeAway': 'home', 'team': {'abbreviation': 'KC'}},
+                        {'homeAway': 'away', 'team': {'abbreviation': 'BUF'}},
+                    ]
+                }]
+            }]
+        }
+
+        response_mock = MagicMock()
+        response_mock.json.return_value = scoreboard_data
+        response_mock.raise_for_status = MagicMock()
+        http_mock.get.return_value = response_mock
+
+        result = client.get_week_matchups(season=2024, week=1)
+
+        assert len(result) == 2
+        assert result[0]['team'] == 'KC'
+        assert result[0]['opponent'] == 'BUF'
+        assert result[0]['is_home'] is True
+        assert result[1]['team'] == 'BUF'
+        assert result[1]['is_home'] is False
+
+    @pytest.mark.unit
     def test_get_league_data_success(self, mock_client):
         """Test fetching league data."""
         client, http_mock = mock_client

@@ -446,23 +446,95 @@ class DataOrchestrator:
 
         return stats
 
-    def full_sync(self, season: int, current_week: int,
+    def sync_matchups(self, season: int, week: int) -> Dict[str, int]:
+        """
+        Synchronize team matchup context for a prediction week.
+
+        Matchup rows are stored per team so player feature computation can look
+        up opponent, home/away, and game date by joining on player.team.
+        """
+        logger.info(f"Starting matchup sync for {season} week {week}...")
+        stats = {'processed': 0, 'inserted': 0, 'updated': 0, 'errors': 0}
+
+        with self.get_db_connection() as conn:
+            log_id = self._log_ingestion(conn, 'espn', 'matchups', season, week)
+
+            try:
+                matchups = self.espn.get_week_matchups(season, week)
+                if not matchups:
+                    raise Exception("No matchup data available")
+
+                cursor = conn.cursor()
+                for matchup in matchups:
+                    stats['processed'] += 1
+                    try:
+                        cursor.execute("""
+                            INSERT INTO team_weekly_matchups (
+                                season, week, team, opponent, is_home, game_date, source
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (season, week, team) DO UPDATE SET
+                                opponent = EXCLUDED.opponent,
+                                is_home = EXCLUDED.is_home,
+                                game_date = EXCLUDED.game_date,
+                                source = EXCLUDED.source
+                        """, (
+                            season,
+                            week,
+                            matchup.get('team'),
+                            matchup.get('opponent'),
+                            matchup.get('is_home'),
+                            matchup.get('game_date'),
+                            matchup.get('source', 'espn'),
+                        ))
+
+                        if cursor.rowcount == 1:
+                            stats['inserted'] += 1
+                        else:
+                            stats['updated'] += 1
+                    except Exception as e:
+                        logger.warning(f"Error processing matchup for {matchup.get('team')}: {e}")
+                        stats['errors'] += 1
+
+                conn.commit()
+                self._update_ingestion_log(
+                    conn, log_id,
+                    stats['processed'], stats['inserted'], stats['updated'],
+                    'completed'
+                )
+            except Exception as e:
+                logger.error(f"Matchup sync failed: {e}")
+                self._update_ingestion_log(
+                    conn, log_id, stats['processed'], stats['inserted'],
+                    stats['updated'], 'failed', str(e)
+                )
+                raise
+
+        return stats
+
+    def full_sync(self, season: int, prediction_week: Optional[int] = None,
+                 current_week: Optional[int] = None,
                  sync_historical: bool = False) -> Dict[str, Any]:
         """
         Run a full data sync.
 
         Args:
             season: NFL season year
-            current_week: Current week of the season
+            prediction_week: Upcoming week being prepared for prediction
+            current_week: Backward-compatible alias for prediction_week
             sync_historical: If True, sync all historical weeks
 
         Returns:
             Dictionary with overall sync results
         """
-        logger.info(f"Starting full sync for {season}, week {current_week}")
+        prediction_week = prediction_week or current_week
+        if prediction_week is None:
+            raise ValueError("prediction_week is required")
+
+        logger.info(f"Starting full sync for {season}, prediction week {prediction_week}")
         results = {
             'players': None,
             'stats': {},
+            'matchups': None,
             'projections': None,
             'errors': []
         }
@@ -475,18 +547,25 @@ class DataOrchestrator:
             results['errors'].append(f"Players: {e}")
 
         # Sync historical stats if requested
-        start_week = 1 if sync_historical else max(1, current_week - 2)
+        completed_week = max(0, prediction_week - 1)
+        start_week = 1 if sync_historical else max(1, completed_week - 1)
 
-        for week in range(start_week, current_week + 1):
+        for week in range(start_week, completed_week + 1):
             try:
                 results['stats'][week] = self.sync_weekly_stats(season, week)
             except Exception as e:
                 logger.error(f"Stats sync error for week {week}: {e}")
                 results['errors'].append(f"Stats week {week}: {e}")
 
+        try:
+            results['matchups'] = self.sync_matchups(season, prediction_week)
+        except Exception as e:
+            logger.error(f"Matchup sync error: {e}")
+            results['errors'].append(f"Matchups: {e}")
+
         # Sync projections for current/next week
         try:
-            results['projections'] = self.sync_projections(season, current_week)
+            results['projections'] = self.sync_projections(season, prediction_week)
         except Exception as e:
             logger.error(f"Projections sync error: {e}")
             results['errors'].append(f"Projections: {e}")

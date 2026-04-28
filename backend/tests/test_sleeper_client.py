@@ -234,6 +234,24 @@ class TestTransformPlayerData:
         assert result['fantasy_positions'] == []
 
     @pytest.mark.unit
+    def test_transform_player_truncates_long_status_fields(self):
+        """Test long player text fields are bounded to schema-safe sizes."""
+        partial_player = {
+            'player_id': '123',
+            'full_name': 'Test Player',
+            'position': 'WR',
+            'status': 'A' * 150,
+            'injury_status': 'B' * 150,
+            'injury_body_part': 'C' * 150,
+        }
+
+        result = transform_player_data(partial_player)
+
+        assert len(result['status']) == 100
+        assert len(result['injury_status']) == 100
+        assert len(result['injury_body_part']) == 100
+
+    @pytest.mark.unit
     def test_transform_player_empty_input(self):
         """Test transforming empty player data."""
         result = transform_player_data({})

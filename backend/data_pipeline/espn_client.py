@@ -11,6 +11,7 @@ Authentication:
 
 import httpx
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 import time
 
@@ -209,6 +210,65 @@ class ESPNClient:
         }
 
         return self._get(url, params=params)
+
+    def get_week_matchups(self, season: int, week: int) -> List[Dict[str, Any]]:
+        """
+        Fetch team matchup context for a specific NFL week.
+
+        Returns one row per team so feature engineering can look up a player's
+        opponent and home/away status.
+        """
+        scoreboard = self.get_scoreboard(season, week)
+        events = (scoreboard or {}).get('events', [])
+        matchups: List[Dict[str, Any]] = []
+
+        for event in events:
+            competitions = event.get('competitions', [])
+            event_date = self._parse_event_date(event.get('date'))
+            for competition in competitions:
+                competitors = competition.get('competitors', [])
+                if len(competitors) != 2:
+                    continue
+
+                teams = []
+                for competitor in competitors:
+                    team = competitor.get('team', {})
+                    abbreviation = team.get('abbreviation')
+                    if not abbreviation:
+                        continue
+                    teams.append({
+                        'team': abbreviation,
+                        'is_home': competitor.get('homeAway') == 'home',
+                    })
+
+                if len(teams) != 2:
+                    continue
+
+                matchups.append({
+                    'team': teams[0]['team'],
+                    'opponent': teams[1]['team'],
+                    'is_home': teams[0]['is_home'],
+                    'game_date': event_date,
+                    'source': 'espn',
+                })
+                matchups.append({
+                    'team': teams[1]['team'],
+                    'opponent': teams[0]['team'],
+                    'is_home': teams[1]['is_home'],
+                    'game_date': event_date,
+                    'source': 'espn',
+                })
+
+        return matchups
+
+    def _parse_event_date(self, value: Optional[str]) -> Optional[datetime]:
+        """Convert ESPN ISO timestamps into naive UTC datetimes for storage."""
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError:
+            return None
 
     def get_league_data(self, league_id: int, season: int,
                        views: List[str] = None) -> Optional[Dict]:

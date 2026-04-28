@@ -233,8 +233,10 @@ def clean_test_db(docker_db_url):
 
         # Truncate all tables before test
         tables = [
+            'player_features',
             'player_weekly_stats',
             'player_projections',
+            'team_weekly_matchups',
             'team_defense_stats',
             'ingestion_log',
             'players'

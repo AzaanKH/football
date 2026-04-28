@@ -187,9 +187,6 @@ def compute_features(season, weeks):
         try:
             with FeatureEngineer(conn) as engineer:
                 for week in weeks:
-                    if week < 2:  # Need at least 1 prior week for features
-                        continue
-
                     logger.info(f"Computing features for week {week}...")
                     try:
                         stats = engineer.compute_all_features(

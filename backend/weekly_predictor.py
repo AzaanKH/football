@@ -59,6 +59,12 @@ class WeeklyPredictor:
         'targets_avg_3',
         'touches_avg_3',
         'receptions_avg_3',
+        'games_played_prior',
+        'current_season_games_played',
+        'has_prev_season_data',
+        'has_full_window_3',
+        'has_full_window_5',
+        'fantasy_pts_baseline',
 
         # Efficiency - quality metrics
         'yards_per_carry',
@@ -88,6 +94,9 @@ class WeeklyPredictor:
     QB_FEATURES = [
         'fantasy_pts_avg_3', 'fantasy_pts_avg_5',
         'passing_yds_avg_3', 'rushing_yds_avg_3',
+        'games_played_prior', 'current_season_games_played',
+        'has_prev_season_data', 'has_full_window_3', 'has_full_window_5',
+        'fantasy_pts_baseline',
         'yards_per_pass_attempt', 'td_per_pass_attempt',
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
@@ -98,6 +107,9 @@ class WeeklyPredictor:
         'fantasy_pts_avg_3', 'fantasy_pts_avg_5',
         'rushing_yds_avg_3', 'receiving_yds_avg_3',
         'touches_avg_3', 'targets_avg_3',
+        'games_played_prior', 'current_season_games_played',
+        'has_prev_season_data', 'has_full_window_3', 'has_full_window_5',
+        'fantasy_pts_baseline',
         'yards_per_carry', 'yards_per_target', 'td_per_touch', 'catch_rate',
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
@@ -107,6 +119,9 @@ class WeeklyPredictor:
     WR_FEATURES = [
         'fantasy_pts_avg_3', 'fantasy_pts_avg_5',
         'receiving_yds_avg_3', 'targets_avg_3', 'receptions_avg_3',
+        'games_played_prior', 'current_season_games_played',
+        'has_prev_season_data', 'has_full_window_3', 'has_full_window_5',
+        'fantasy_pts_baseline',
         'yards_per_target', 'yards_per_reception', 'td_per_touch', 'catch_rate',
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
@@ -138,9 +153,9 @@ class WeeklyPredictor:
         else:
             return self.PREDICTION_FEATURES
 
-    def _build_training_data(self, position: str) -> Tuple[pd.DataFrame, pd.Series]:
+    def _load_training_frame(self, position: str) -> pd.DataFrame:
         """
-        Build training dataset from database.
+        Load training dataset from database.
 
         For each row:
         - Features: Computed features for Week N (using data from weeks < N)
@@ -167,7 +182,6 @@ class WeeklyPredictor:
                 ON pf.player_id = p.player_id
             WHERE p.position = %s
                 AND pws.fantasy_points_ppr IS NOT NULL
-                AND pf.fantasy_pts_avg_3 IS NOT NULL
             ORDER BY pf.season, pf.week
         """
 
@@ -181,12 +195,18 @@ class WeeklyPredictor:
         df = pd.DataFrame(rows, columns=columns)
         logger.info(f"Loaded {len(df)} training samples for {position.upper()}")
 
-        # Get features and target
+        return df
+
+    def _build_training_data(self, position: str) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+        """Build model-ready training features, target, and week metadata."""
+        df = self._load_training_frame(position)
+
         feature_cols = self.get_features_for_position(position)
         available_features = [f for f in feature_cols if f in df.columns]
 
         X = df[available_features].copy()
         y = df['actual_points'].copy()
+        meta = df[['season', 'week']].copy()
 
         # Convert all columns to numeric (handles object types from PostgreSQL)
         for col in X.columns:
@@ -196,13 +216,41 @@ class WeeklyPredictor:
         X = X.fillna(0)
 
         # Convert boolean to int
-        if 'is_home' in X.columns:
-            X['is_home'] = X['is_home'].astype(int)
+        for bool_col in ['is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5']:
+            if bool_col in X.columns:
+                X[bool_col] = X[bool_col].astype(int)
 
         # Ensure target is numeric
         y = pd.to_numeric(y, errors='coerce').fillna(0)
 
-        return X, y
+        return X, y, meta
+
+    def _temporal_train_test_split(
+        self, X: pd.DataFrame, y: pd.Series, meta: pd.DataFrame, test_ratio: float = 0.2
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """Split by chronological season/week buckets instead of random rows."""
+        week_keys = (
+            meta[['season', 'week']]
+            .drop_duplicates()
+            .sort_values(['season', 'week'])
+            .reset_index(drop=True)
+        )
+        if len(week_keys) < 2:
+            raise ValueError("Need at least two distinct weeks for temporal split")
+
+        n_test_weeks = max(1, int(np.ceil(len(week_keys) * test_ratio)))
+        n_test_weeks = min(n_test_weeks, len(week_keys) - 1)
+        test_keys = week_keys.tail(n_test_weeks)
+
+        test_index = meta.merge(
+            test_keys.assign(_is_test=True),
+            on=['season', 'week'],
+            how='left'
+        )['_is_test'].fillna(False)
+        train_mask = ~test_index.astype(bool)
+        test_mask = test_index.astype(bool)
+
+        return X[train_mask], X[test_mask], y[train_mask], y[test_mask]
 
     def train(self, position: str, X: pd.DataFrame = None, y: pd.Series = None) -> Dict:
         """
@@ -219,14 +267,13 @@ class WeeklyPredictor:
         position = position.lower()
 
         if X is None or y is None:
-            X, y = self._build_training_data(position)
+            X, y, meta = self._build_training_data(position)
+        else:
+            meta = pd.DataFrame({'season': [0] * len(X), 'week': list(range(len(X)))})
 
         logger.info(f"Training {position.upper()} model with {len(X)} samples, {len(X.columns)} features")
 
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+        X_train, X_test, y_train, y_test = self._temporal_train_test_split(X, y, meta)
 
         # Train main model
         model = XGBRegressor(
@@ -340,8 +387,9 @@ class WeeklyPredictor:
         X = X.fillna(0)
 
         # Convert boolean
-        if 'is_home' in X.columns:
-            X['is_home'] = X['is_home'].astype(int)
+        for bool_col in ['is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5']:
+            if bool_col in X.columns:
+                X[bool_col] = X[bool_col].astype(int)
 
         return self.models[position].predict(X)
 
@@ -377,8 +425,9 @@ class WeeklyPredictor:
 
         X = X.fillna(0)
 
-        if 'is_home' in X.columns:
-            X['is_home'] = X['is_home'].astype(int)
+        for bool_col in ['is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5']:
+            if bool_col in X.columns:
+                X[bool_col] = X[bool_col].astype(int)
 
         # Get predictions
         predictions = self.models[position].predict(X)
@@ -449,11 +498,25 @@ class WeeklyPredictor:
             for player_id in player_ids:
                 features = engineer.compute_player_features(player_id, season, week)
                 all_features.append(features)
-
-            return pd.DataFrame(all_features)
+            features_df = pd.DataFrame(all_features)
+            metadata = self._get_player_metadata(player_ids)
+            return features_df.merge(metadata, on='player_id', how='left')
         except ImportError:
             logger.error("Feature engineer not available for on-demand computation")
             return pd.DataFrame()
+
+    def _get_player_metadata(self, player_ids: List[str]) -> pd.DataFrame:
+        """Fetch player metadata required by prediction output and grouping."""
+        placeholders = ','.join(['%s'] * len(player_ids))
+        query = f"""
+            SELECT player_id, full_name as player_name, position
+            FROM players
+            WHERE player_id IN ({placeholders})
+        """
+        cursor = self.db_connection.cursor()
+        cursor.execute(query, player_ids)
+        columns = [desc[0] for desc in cursor.description]
+        return pd.DataFrame(cursor.fetchall(), columns=columns)
 
     def predict_week(self, player_ids: List[str], season: int, week: int,
                      position: str = None) -> List[WeeklyPrediction]:
@@ -551,6 +614,78 @@ class WeeklyPredictor:
 
         logger.info(f"Weekly predictor loaded from {filepath}")
         return predictor
+
+    def backtest(self, position: str, min_train_weeks: int = 4) -> Dict[str, object]:
+        """
+        Walk-forward backtest using chronological week folds.
+        """
+        position = position.lower()
+        X, y, meta = self._build_training_data(position)
+        week_keys = (
+            meta[['season', 'week']]
+            .drop_duplicates()
+            .sort_values(['season', 'week'])
+            .reset_index(drop=True)
+        )
+
+        folds = []
+        predictions = []
+
+        for idx in range(min_train_weeks, len(week_keys)):
+            test_key = week_keys.iloc[idx]
+            train_keys = week_keys.iloc[:idx]
+
+            train_mask = meta.merge(
+                train_keys.assign(_keep=True),
+                on=['season', 'week'],
+                how='left'
+            )['_keep'].fillna(False).astype(bool)
+            test_mask = (
+                (meta['season'] == test_key['season']) &
+                (meta['week'] == test_key['week'])
+            )
+
+            if not train_mask.any() or not test_mask.any():
+                continue
+
+            model = XGBRegressor(
+                n_estimators=200,
+                learning_rate=0.05,
+                max_depth=4,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                n_jobs=-1
+            )
+            model.fit(X[train_mask], y[train_mask])
+            y_pred = model.predict(X[test_mask])
+            y_true = y[test_mask]
+
+            fold_metrics = {
+                'season': int(test_key['season']),
+                'week': int(test_key['week']),
+                'samples': int(test_mask.sum()),
+                'mae': float(mean_absolute_error(y_true, y_pred)),
+                'rmse': float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            }
+            folds.append(fold_metrics)
+            predictions.extend(zip(y_true.tolist(), y_pred.tolist()))
+
+        if not folds:
+            raise ValueError("Not enough chronological data to backtest")
+
+        actuals = np.array([row[0] for row in predictions])
+        preds = np.array([row[1] for row in predictions])
+        return {
+            'position': position,
+            'folds': folds,
+            'overall': {
+                'mae': float(mean_absolute_error(actuals, preds)),
+                'rmse': float(np.sqrt(mean_squared_error(actuals, preds))),
+                'r2': float(r2_score(actuals, preds)) if len(actuals) > 1 else 0.0,
+                'samples': int(len(actuals)),
+            }
+        }
 
 
 def get_db_connection():
@@ -653,8 +788,21 @@ if __name__ == '__main__':
             sys.exit(1)
 
     elif command == 'backtest':
-        print("Backtesting not yet implemented")
-        # TODO: Implement walk-forward backtesting
+        if len(sys.argv) < 3:
+            print("Usage: python weekly_predictor.py backtest <position>")
+            sys.exit(1)
+
+        position = sys.argv[2]
+        try:
+            conn = get_db_connection()
+            predictor = WeeklyPredictor(db_connection=conn)
+            results = predictor.backtest(position)
+            print(f"\nBacktest for {position.upper()}:")
+            print(results['overall'])
+            conn.close()
+        except Exception as e:
+            print(f"Backtest failed: {e}")
+            sys.exit(1)
 
     else:
         print(f"Unknown command: {command}")

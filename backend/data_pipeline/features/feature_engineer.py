@@ -6,7 +6,7 @@ and handles batch processing and database operations.
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from decimal import Decimal
 import time
 
@@ -124,14 +124,22 @@ class FeatureEngineer:
         stats = {'total': 0, 'inserted': 0, 'updated': 0, 'errors': 0}
 
         # Get players who have stats prior to this week
-        player_ids = self._get_players_with_prior_stats(season, week, positions)
-        stats['total'] = len(player_ids)
+        player_contexts = self._get_players_with_prior_stats(season, week, positions)
+        stats['total'] = len(player_contexts)
 
-        logger.info(f"Computing features for {len(player_ids)} players ({season} W{week})")
+        logger.info(f"Computing features for {len(player_contexts)} players ({season} W{week})")
 
-        for i, player_id in enumerate(player_ids):
+        for i, player_context in enumerate(player_contexts):
             try:
-                features = self.compute_player_features(player_id, season, week)
+                features = self.compute_player_features(
+                    player_context['player_id'],
+                    season,
+                    week,
+                    matchup_info={
+                        'opponent': player_context.get('opponent'),
+                        'is_home': player_context.get('is_home'),
+                    }
+                )
                 result = self._save_features(features)
                 if result == 'inserted':
                     stats['inserted'] += 1
@@ -141,10 +149,10 @@ class FeatureEngineer:
                 # Progress logging every 100 players
                 if (i + 1) % 100 == 0:
                     elapsed = time.time() - start_time
-                    logger.info(f"  Progress: {i + 1}/{len(player_ids)} ({elapsed:.1f}s)")
+                    logger.info(f"  Progress: {i + 1}/{len(player_contexts)} ({elapsed:.1f}s)")
 
             except Exception as e:
-                logger.error(f"Error computing features for {player_id}: {e}")
+                logger.error(f"Error computing features for {player_context['player_id']}: {e}")
                 stats['errors'] += 1
 
         self.connection.commit()
@@ -196,7 +204,7 @@ class FeatureEngineer:
         season: int,
         week: int,
         positions: Optional[List[str]] = None
-    ) -> List[str]:
+    ) -> List[Dict[str, Any]]:
         """
         Get player IDs who have stats in prior weeks of the season.
 
@@ -209,12 +217,23 @@ class FeatureEngineer:
             List of player IDs
         """
         query = """
-            SELECT DISTINCT pws.player_id
-            FROM player_weekly_stats pws
-            JOIN players p ON pws.player_id = p.player_id
-            WHERE pws.season = %s AND pws.week < %s
+            SELECT DISTINCT
+                p.player_id,
+                twm.opponent,
+                twm.is_home
+            FROM players p
+            LEFT JOIN team_weekly_matchups twm
+                ON p.team = twm.team
+                AND twm.season = %s
+                AND twm.week = %s
+            WHERE EXISTS (
+                SELECT 1
+                FROM player_weekly_stats pws
+                WHERE pws.player_id = p.player_id
+                  AND ((pws.season = %s AND pws.week < %s) OR pws.season < %s)
+            )
         """
-        params = [season, week]
+        params = [season, week, season, week, season]
 
         if positions:
             placeholders = ','.join(['%s'] * len(positions))
@@ -222,7 +241,11 @@ class FeatureEngineer:
             params.extend(positions)
 
         self.cursor.execute(query, params)
-        return [row[0] for row in self.cursor.fetchall()]
+        rows = self.cursor.fetchall()
+        return [
+            {'player_id': row[0], 'opponent': row[1], 'is_home': row[2]}
+            for row in rows
+        ]
 
     def _get_weeks_with_data(self, season: int) -> List[int]:
         """Get weeks that have data for a season."""
@@ -252,6 +275,10 @@ class FeatureEngineer:
             'fantasy_pts_avg_3', 'fantasy_pts_avg_5', 'fantasy_pts_avg_10',
             'rushing_yds_avg_3', 'receiving_yds_avg_3', 'passing_yds_avg_3',
             'targets_avg_3', 'touches_avg_3', 'receptions_avg_3',
+            'games_played_prior', 'current_season_games_played',
+            'has_prev_season_data', 'has_full_window_3',
+            'has_full_window_5', 'has_full_window_10',
+            'fantasy_pts_baseline',
             # Efficiency
             'yards_per_carry', 'yards_per_target', 'yards_per_reception',
             'td_per_touch', 'catch_rate', 'yards_per_pass_attempt', 'td_per_pass_attempt',
