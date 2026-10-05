@@ -141,12 +141,31 @@ class TestDataOrchestratorUnit:
         mocks = mock_orchestrator
         mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
         cursor = mocks['db']['cursor']
-        cursor.rowcount = 1
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
 
         result = mocks['orchestrator'].sync_weekly_stats(2024, 10)
 
         assert result['processed'] == 2
         mocks['sleeper'].get_weekly_stats.assert_called_once_with(2024, 10)
+
+    @pytest.mark.unit
+    def test_sync_weekly_stats_skips_untracked_players(self, mock_orchestrator, sample_weekly_stats):
+        """Sleeper returns team defenses and IDP rows; only tracked players are stored."""
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = {
+            **sample_weekly_stats,
+            'KC': {'pts_ppr': 9.0},
+            '99999': {'pts_ppr': 1.0},
+        }
+        cursor = mocks['db']['cursor']
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
+
+        result = mocks['orchestrator'].sync_weekly_stats(2024, 10)
+
+        stored_ids = {row['player_id'] for row in self._stat_inserts(cursor)}
+        assert stored_ids == set(sample_weekly_stats)
+        assert result['skipped_unknown'] == 2
+        assert result['processed'] == len(sample_weekly_stats)
 
     @staticmethod
     def _stat_inserts(cursor):
@@ -225,6 +244,7 @@ class TestDataOrchestratorUnit:
         mocks = mock_orchestrator
         mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
         cursor = mocks['db']['cursor']
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
         cursor.fetchone.return_value = (False,)
 
         result = mocks['orchestrator'].sync_weekly_stats(2024, 10)
@@ -326,6 +346,7 @@ class TestDataOrchestratorUnit:
         mocks['sleeper'].get_nfl_state.return_value = sample_nfl_state
         cursor = mocks['db']['cursor']
         cursor.rowcount = 1
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
 
         result = mocks['orchestrator'].full_sync(season=2024, current_week=10)
 
@@ -348,6 +369,7 @@ class TestDataOrchestratorUnit:
         ]
         cursor = mocks['db']['cursor']
         cursor.rowcount = 1
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
 
         result = mocks['orchestrator'].full_sync(
             season=2024, current_week=5, sync_historical=True

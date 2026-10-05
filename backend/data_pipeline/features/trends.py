@@ -92,6 +92,7 @@ class TrendFeatures:
                 rushing_attempts, targets, receptions
             FROM player_weekly_stats
             WHERE player_id = %s
+              AND played
               AND ((season = %s AND week < %s) OR (season < %s))
             ORDER BY season DESC, week DESC
             LIMIT 5

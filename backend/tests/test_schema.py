@@ -86,3 +86,27 @@ class TestFreshSchema:
             WHERE player_id = '4034' AND season = 2025 AND week = 5
         """)
         assert cursor.fetchone() == (1, 18.0)
+
+    @requires_docker
+    def test_played_flag_requires_an_opportunity(self, fresh_schema_db):
+        """Inactive weeks (0 points, 0 opportunities) must not count as games."""
+        cursor = fresh_schema_db.cursor()
+        cursor.executemany("""
+            INSERT INTO player_weekly_stats
+                (player_id, season, week, passing_attempts, rushing_attempts, targets, receptions,
+                 fantasy_points_ppr)
+            VALUES (%s, 2025, %s, %s, %s, %s, %s, %s)
+        """, [
+            ('p1', 1, 0, 0, 0, 0, 0),                 # inactive
+            ('p1', 2, None, None, None, None, None),  # missing stats
+            ('p1', 3, 0, 0, 1, 0, 0),                 # one target, no catch
+            ('p1', 4, 0, 1, 0, 0, 0.3),               # one carry
+            ('p1', 5, 30, 0, 0, 0, 18.2),             # QB passing only
+            ('p1', 6, 0, 0, 0, 0, 9.0),               # kicker / return TD: points, no touches
+        ])
+        fresh_schema_db.commit()
+
+        cursor.execute("SELECT week, played FROM player_weekly_stats ORDER BY week")
+        assert cursor.fetchall() == [
+            (1, False), (2, False), (3, True), (4, True), (5, True), (6, True)
+        ]
