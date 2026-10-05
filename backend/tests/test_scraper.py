@@ -12,7 +12,8 @@ from bs4 import BeautifulSoup
 
 from data_pipeline.scraper import (
     ProFootballReferenceScraper,
-    transform_pfr_fantasy_stats
+    transform_pfr_fantasy_stats,
+    normalize_pfr_weekly_stats,
 )
 
 
@@ -323,3 +324,54 @@ class TestTransformPFRFantasyStats:
         # Only the first row with valid name should be included
         assert len(results) == 1
         assert results[0]['full_name'] == 'Valid Player'
+
+
+class TestNormalizePFRWeeklyStats:
+    """Tests for weekly PFR normalization into player_weekly_stats rows."""
+
+    @pytest.mark.unit
+    def test_maps_grouped_columns_without_substring_collisions(self):
+        """'Rec' must not match 'Receiving_Yds'; Yds/TD resolve by header group."""
+        df = pd.DataFrame({
+            'Unnamed: 1_level_0_Player': ['Josh Allen'],
+            'Unnamed: 2_level_0_FantPos': ['QB'],
+            'Passing_Yds': [262],
+            'Passing_TD': [2],
+            'Rushing_Yds': [54],
+            'Rushing_TD': [1],
+            'Receiving_Rec': [0],
+            'Receiving_Yds': [0],
+            'Fantasy_PPR': [26.9],
+        })
+
+        [row] = normalize_pfr_weekly_stats(df, 2024, 10)
+
+        assert row['full_name'] == 'Josh Allen'
+        assert row['passing_yards'] == 262
+        assert row['rushing_yards'] == 54
+        assert row['passing_tds'] == 2
+        assert row['rushing_tds'] == 1
+        assert row['receptions'] == 0
+        assert row['fantasy_points_ppr'] == 26.9
+        assert (row['season'], row['week'], row['source']) == (2024, 10, 'scraped')
+
+    @pytest.mark.unit
+    def test_missing_required_column_raises(self):
+        df = pd.DataFrame({'Player': ['Test Player'], 'FantPt': [100.0]})
+
+        with pytest.raises(ValueError, match='fantasy_points_ppr'):
+            normalize_pfr_weekly_stats(df, 2024, 10)
+
+    @pytest.mark.unit
+    def test_skips_repeated_header_rows_and_fills_all_schema_fields(self):
+        df = pd.DataFrame({
+            'Player': ['Player', 'Test Player'],
+            'PPR': ['PPR', '12.5'],
+        })
+
+        rows = normalize_pfr_weekly_stats(df, 2024, 3)
+
+        assert len(rows) == 1
+        assert rows[0]['fantasy_points_ppr'] == 12.5
+        for field in ('rushing_attempts', 'fumbles', 'receiving_2pt', 'interceptions'):
+            assert rows[0][field] == 0

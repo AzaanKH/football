@@ -31,7 +31,8 @@ from psycopg2.extras import execute_values, RealDictCursor
 
 from .sleeper_client import SleeperClient, transform_player_data, transform_weekly_stats
 from .espn_client import ESPNClient
-from .scraper import ProFootballReferenceScraper, transform_pfr_fantasy_stats
+from .scraper import ProFootballReferenceScraper, normalize_pfr_weekly_stats
+from .player_ids import PlayerIdResolver
 
 logger = logging.getLogger(__name__)
 
@@ -236,101 +237,112 @@ class DataOrchestrator:
 
         return stats
 
+    # Stat columns written for every weekly row (shared by insert and upsert)
+    WEEKLY_STAT_COLUMNS = [
+        'fantasy_points', 'fantasy_points_ppr',
+        'passing_attempts', 'passing_completions', 'passing_yards', 'passing_tds',
+        'interceptions', 'passing_2pt',
+        'rushing_attempts', 'rushing_yards', 'rushing_tds', 'rushing_2pt',
+        'targets', 'receptions', 'receiving_yards', 'receiving_tds', 'receiving_2pt',
+        'fumbles', 'fumbles_lost', 'source',
+    ]
+
+    def _scraped_weekly_rows(self, conn, season: int, week: int,
+                             stats: Dict[str, int]) -> List[Dict]:
+        """
+        Fetch PFR weekly stats and map player names to Sleeper IDs.
+
+        Unmatched or ambiguous names are skipped (counted in stats['unmatched'])
+        rather than stored under a name-based ID that nothing else joins on.
+        """
+        df = self.scraper.get_weekly_fantasy_stats(season, week)
+        if df is None:
+            raise Exception("Both API and scraper failed")
+
+        scraped = normalize_pfr_weekly_stats(df, season, week)
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT player_id, full_name, position, team FROM players")
+        resolver = PlayerIdResolver(cursor.fetchall())
+
+        rows = []
+        for row in scraped:
+            player_id = resolver.resolve(row['full_name'], row.get('position'), row.get('team'))
+            if player_id is None:
+                stats['unmatched'] += 1
+                logger.debug(f"No unique Sleeper ID for scraped player {row['full_name']!r}")
+                continue
+            rows.append({**row, 'player_id': player_id})
+
+        if stats['unmatched']:
+            logger.warning(
+                f"Skipped {stats['unmatched']} scraped players without a unique Sleeper ID"
+            )
+        return rows
+
     def sync_weekly_stats(self, season: int, week: int,
-                         use_fallback: bool = True) -> Dict[str, int]:
+                          use_fallback: bool = False) -> Dict[str, int]:
         """
         Synchronize weekly stats from API to database.
 
         Args:
             season: NFL season year
             week: Week number
-            use_fallback: If True, try scraping if API fails
+            use_fallback: If True, scrape Pro Football Reference when Sleeper
+                returns nothing. Off by default: PFR currently blocks automated
+                requests (HTTP 403), and scraped rows need name->ID matching.
 
         Returns:
             Dictionary with sync statistics
         """
         logger.info(f"Starting stats sync for {season} week {week}...")
-        stats = {'processed': 0, 'inserted': 0, 'updated': 0, 'errors': 0}
+        stats = {'processed': 0, 'inserted': 0, 'updated': 0, 'errors': 0, 'unmatched': 0}
 
         with self.get_db_connection() as conn:
             log_id = self._log_ingestion(conn, 'sleeper', 'stats', season, week)
 
             try:
-                # Try Sleeper API first
+                # Each source is normalized by its own transformer into schema rows
                 weekly_stats = self.sleeper.get_weekly_stats(season, week)
+                rows = [
+                    transform_weekly_stats(player_id, player_stats, season, week)
+                    for player_id, player_stats in (weekly_stats or {}).items()
+                ]
 
-                if not weekly_stats and use_fallback:
+                if not rows and use_fallback:
                     logger.warning("Sleeper API failed, trying scraper fallback...")
                     self._update_ingestion_log(
                         conn, log_id, 0, 0, 0, 'failed',
                         'Sleeper API returned no data, falling back to scraper'
                     )
-
-                    # Try scraping
                     log_id = self._log_ingestion(conn, 'scraped', 'stats', season, week)
-                    df = self.scraper.get_weekly_fantasy_stats(season, week)
+                    rows = self._scraped_weekly_rows(conn, season, week, stats)
 
-                    if df is not None:
-                        scraped_stats = transform_pfr_fantasy_stats(df, season)
-                        # Convert to dict format like Sleeper
-                        weekly_stats = {s.get('full_name', ''): s for s in scraped_stats}
-                    else:
-                        raise Exception("Both API and scraper failed")
-
-                if not weekly_stats:
+                if not rows:
                     raise Exception("No stats data available")
 
                 cursor = conn.cursor()
+                columns = ['player_id', 'season', 'week'] + self.WEEKLY_STAT_COLUMNS
+                insert_sql = f"""
+                    INSERT INTO player_weekly_stats ({', '.join(columns)})
+                    VALUES ({', '.join(f'%({c})s' for c in columns)})
+                    ON CONFLICT (player_id, season, week) DO UPDATE SET
+                        {', '.join(f'{c} = EXCLUDED.{c}' for c in self.WEEKLY_STAT_COLUMNS)}
+                    RETURNING (xmax = 0) AS inserted
+                """
 
-                for player_id, player_stats in weekly_stats.items():
+                for row in rows:
                     stats['processed'] += 1
 
                     try:
-                        transformed = transform_weekly_stats(
-                            player_id, player_stats, season, week
-                        )
-
                         # Use savepoint to allow recovery from individual errors
                         cursor.execute("SAVEPOINT stats_insert")
-
-                        cursor.execute("""
-                            INSERT INTO player_weekly_stats (
-                                player_id, season, week, fantasy_points,
-                                fantasy_points_ppr, passing_attempts,
-                                passing_completions, passing_yards, passing_tds,
-                                interceptions, passing_2pt, rushing_attempts,
-                                rushing_yards, rushing_tds, rushing_2pt,
-                                targets, receptions, receiving_yards,
-                                receiving_tds, receiving_2pt, fumbles,
-                                fumbles_lost, source
-                            ) VALUES (
-                                %(player_id)s, %(season)s, %(week)s,
-                                %(fantasy_points)s, %(fantasy_points_ppr)s,
-                                %(passing_attempts)s, %(passing_completions)s,
-                                %(passing_yards)s, %(passing_tds)s,
-                                %(interceptions)s, %(passing_2pt)s,
-                                %(rushing_attempts)s, %(rushing_yards)s,
-                                %(rushing_tds)s, %(rushing_2pt)s,
-                                %(targets)s, %(receptions)s, %(receiving_yards)s,
-                                %(receiving_tds)s, %(receiving_2pt)s,
-                                %(fumbles)s, %(fumbles_lost)s, %(source)s
-                            )
-                            ON CONFLICT (player_id, season, week) DO UPDATE SET
-                                fantasy_points = EXCLUDED.fantasy_points,
-                                fantasy_points_ppr = EXCLUDED.fantasy_points_ppr,
-                                passing_yards = EXCLUDED.passing_yards,
-                                passing_tds = EXCLUDED.passing_tds,
-                                rushing_yards = EXCLUDED.rushing_yards,
-                                rushing_tds = EXCLUDED.rushing_tds,
-                                receiving_yards = EXCLUDED.receiving_yards,
-                                receiving_tds = EXCLUDED.receiving_tds,
-                                receptions = EXCLUDED.receptions,
-                                targets = EXCLUDED.targets
-                        """, transformed)
-
+                        cursor.execute(insert_sql, row)
+                        result = cursor.fetchone()
                         cursor.execute("RELEASE SAVEPOINT stats_insert")
 
-                        if cursor.rowcount == 1:
+                        # xmax = 0 only for freshly inserted rows (not ON CONFLICT updates)
+                        if result and result[0]:
                             stats['inserted'] += 1
                         else:
                             stats['updated'] += 1
@@ -338,7 +350,7 @@ class DataOrchestrator:
                     except Exception as e:
                         # Rollback to savepoint to allow next insert to proceed
                         cursor.execute("ROLLBACK TO SAVEPOINT stats_insert")
-                        logger.warning(f"Error processing stats for {player_id}: {e}")
+                        logger.warning(f"Error processing stats for {row.get('player_id')}: {e}")
                         stats['errors'] += 1
 
                 conn.commit()
