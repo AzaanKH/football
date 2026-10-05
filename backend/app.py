@@ -204,23 +204,33 @@ def predict_week():
 
         conn.close()
 
-        # Convert dataclass to dict
+        # Every requested player appears in exactly one list
         results = []
+        unavailable = []
         for pred in predictions:
-            results.append({
-                'player_id': pred.player_id,
-                'player_name': pred.player_name,
-                'predicted_points': pred.predicted_points,
-                'confidence_low': pred.confidence_low,
-                'confidence_high': pred.confidence_high,
-                'features': pred.features_used
-            })
+            if pred.status == 'ok':
+                results.append({
+                    'player_id': pred.player_id,
+                    'player_name': pred.player_name,
+                    'predicted_points': pred.predicted_points,
+                    'confidence_low': pred.confidence_low,
+                    'confidence_high': pred.confidence_high,
+                    'features': pred.features_used
+                })
+            else:
+                unavailable.append({
+                    'player_id': pred.player_id,
+                    'player_name': pred.player_name,
+                    'reason': pred.reason,
+                    'message': pred.message,
+                })
 
         return jsonify({
             'week': week,
             'season': season,
             'position': position,
-            'predictions': results
+            'predictions': results,
+            'unavailable': unavailable
         })
 
     except Exception as e:
