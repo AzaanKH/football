@@ -36,7 +36,7 @@ Compare players with predicted points, confidence ranges, and 3-game averages.
 
 - **Frontend**: React + shadcn/ui in `frontend/fantasy-football/`
 - **API**: Flask backend in `backend/app.py`
-- **Database**: PostgreSQL + TimescaleDB in Docker Desktop
+- **Database**: PostgreSQL in Docker Desktop (TimescaleDB image, plain tables)
 - **Data Pipeline**: Sleeper + ESPN integrations in `backend/data_pipeline/`
 - **Models**: Position-specific XGBoost weekly predictor in `backend/weekly_predictor.py`
 
@@ -231,6 +231,24 @@ The current weekly predictor:
 cd backend
 python run_tests.py unit
 ```
+
+### Run end-to-end tests
+
+E2E tests truncate tables, so they run against a dedicated `football_test`
+database (created and initialized from `init_db.sql` automatically). They refuse
+to run against `football_dev` or any database whose name lacks `test`.
+
+```bash
+cd backend
+docker-compose up -d
+python run_tests.py e2e
+# Custom target: TEST_DATABASE_URL=postgresql://user:pass@host:5432/my_test_db
+```
+
+### Backend server options
+
+`python app.py` binds to `127.0.0.1` with the debugger off. Opt in with
+`FLASK_DEBUG=1` (never on a network-reachable host) or `FLASK_HOST=0.0.0.0`.
 
 ### Backtest a position model
 
