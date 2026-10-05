@@ -29,7 +29,7 @@ import os
 import time
 import logging
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 logging.basicConfig(
@@ -50,7 +50,6 @@ except ImportError:
 
 
 # Configuration
-SEASON = 2025
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST', 'localhost'),
     'port': int(os.environ.get('DB_PORT', 5432)),
@@ -66,43 +65,49 @@ def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def get_current_nfl_week() -> tuple:
-    """Get current NFL season and week."""
-    try:
-        from data_pipeline import SleeperClient
-
-        with SleeperClient() as client:
-            state = client.get_nfl_state()
-            if state:
-                return state.get('season', SEASON), state.get('week', 1)
-    except Exception as e:
-        logger.warning(f"Could not get NFL state: {e}")
-
-    return SEASON, 1
+def _context_to_dict(context) -> dict:
+    completed = context.completed_weeks
+    return {
+        'season': context.season,
+        'season_type': context.season_type,
+        'nfl_week': context.week,
+        'prediction_week': context.prediction_week,
+        'completed_week': context.last_completed_week,
+        # Re-sync the last two finished weeks to pick up stat corrections
+        'weeks_to_refresh': completed[-2:],
+        'is_offseason': context.is_offseason,
+        'source': context.source,
+    }
 
 
 def resolve_pipeline_context(season: Optional[int] = None, nfl_week: Optional[int] = None) -> dict:
     """
-    Resolve explicit completed and prediction weeks for weekly automation.
+    Resolve the season, finished weeks and prediction week for automation.
 
-    The scheduler runs on Tuesday morning, so Sleeper's current week is treated
-    as the upcoming prediction week and the completed stats week is one prior.
+    With no arguments this follows the real calendar (Sleeper's NFL state,
+    falling back to the date) and counts the current week as finished once
+    its last game is over, using the synced schedule. Explicit season/week
+    treat that week as the upcoming one (weeks before it are finished).
     """
-    if season is None or nfl_week is None:
-        season, nfl_week = get_current_nfl_week()
+    from data_pipeline.season import build_context, current_context, schedule_week_end
 
-    prediction_week = max(1, nfl_week)
-    completed_week = max(0, prediction_week - 1)
-    weeks_to_refresh = [w for w in {completed_week - 1, completed_week} if w >= 1]
+    if season is not None and nfl_week is not None:
+        state = {'season': season, 'week': nfl_week,
+                 'season_type': 'regular' if nfl_week >= 1 else 'off'}
+        context = build_context(state, datetime.now(timezone.utc), 'explicit')
+        return _context_to_dict(context)
 
-    return {
-        'season': season,
-        'nfl_week': nfl_week,
-        'prediction_week': prediction_week,
-        'completed_week': completed_week,
-        'weeks_to_refresh': sorted(weeks_to_refresh),
-        'is_offseason': nfl_week == 0,
-    }
+    conn = None
+    try:
+        conn = get_db_connection()
+        context = current_context(week_end_lookup=schedule_week_end(conn))
+    except Exception as e:
+        logger.warning(f"Schedule unavailable ({e}); resolving the week without it")
+        context = current_context()
+    finally:
+        if conn is not None:
+            conn.close()
+    return _context_to_dict(context)
 
 
 def _skipped(reason: str, **extra) -> dict:
