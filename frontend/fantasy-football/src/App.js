@@ -103,6 +103,13 @@ const positionInfo = {
 };
 
 
+// How each point prediction was produced (backend `projection_source`)
+const SOURCE_LABELS = {
+  sleeper: 'Sleeper projection',
+  'sleeper+model': 'Sleeper projection, model-adjusted',
+  model: 'Model estimate (no Sleeper projection)',
+};
+
 let nextSlotKey = 0;
 const newSlot = () => ({ key: nextSlotKey++, player: null });
 
@@ -530,7 +537,10 @@ const App = () => {
 
                       <div className="flex items-center justify-between mt-1">
                         <p className="text-xs text-slate-500">
-                          Range: {player.confidenceLow.toFixed(1)} - {player.confidenceHigh.toFixed(1)} pts
+                          80% range: {player.confidenceLow.toFixed(1)} - {player.confidenceHigh.toFixed(1)} pts
+                          {SOURCE_LABELS[player.features?.projection_source] && (
+                            <> · {SOURCE_LABELS[player.features.projection_source]}</>
+                          )}
                         </p>
                         {player.features?.avg_3_games != null && (
                           <p className="text-xs text-slate-500">

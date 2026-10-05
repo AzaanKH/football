@@ -24,7 +24,7 @@ const prediction = (player, points) => ({
   predicted_points: points,
   confidence_low: points - 8,
   confidence_high: points + 8,
-  features: { avg_3_games: points, trend: 'improving' },
+  features: { avg_3_games: points, trend: 'improving', projection_source: 'sleeper' },
 });
 
 beforeEach(() => {
@@ -91,6 +91,7 @@ test('results keep their own labels and are flagged stale when inputs change', a
     expect.anything()
   );
   expect(screen.queryByText(/previous selection/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/80% range: 11.6 - 27.6 pts · Sleeper projection/)).toBeInTheDocument();
 
   userEvent.click(screen.getByRole('button', { name: /add player/i }));
   await selectPlayer('Bijan Robinson');

@@ -51,6 +51,36 @@ class TestSchedulerUnit:
             orchestrator.sync_projections.assert_called_once_with(2024, 10)
 
     @pytest.mark.unit
+    def test_matchup_failure_does_not_block_projections(self):
+        """Projections are the point estimate; a broken matchup feed must not skip them."""
+        with patch('scheduler.resolve_pipeline_context', return_value={
+            'season': 2024, 'prediction_week': 10, 'completed_week': 9,
+            'weeks_to_refresh': [8, 9], 'nfl_week': 10,
+        }), patch('data_pipeline.DataOrchestrator') as orchestrator_cls:
+            orchestrator = MagicMock()
+            orchestrator.sync_matchups.side_effect = Exception('No matchup data available')
+            orchestrator.sync_projections.return_value = {'processed': 400}
+            orchestrator_cls.return_value.__enter__.return_value = orchestrator
+
+            result = scheduler.job_sync_prediction_context()
+
+            assert result['matchups']['status'] == 'failed'
+            assert result['projections']['processed'] == 400
+
+    @pytest.mark.unit
+    def test_job_refresh_projections_syncs_prediction_week(self):
+        with patch('scheduler.resolve_pipeline_context', return_value={
+            'season': 2025, 'prediction_week': 7, 'completed_week': 6,
+            'weeks_to_refresh': [5, 6], 'nfl_week': 7,
+        }), patch('data_pipeline.DataOrchestrator') as orchestrator_cls:
+            orchestrator = MagicMock()
+            orchestrator.sync_projections.return_value = {'processed': 3000}
+            orchestrator_cls.return_value.__enter__.return_value = orchestrator
+
+            assert scheduler.job_refresh_projections() == {'processed': 3000}
+            orchestrator.sync_projections.assert_called_once_with(2025, 7)
+
+    @pytest.mark.unit
     def test_job_sync_weekly_stats_uses_completed_weeks_only(self):
         """Stats sync should refresh completed weeks, not the upcoming prediction week."""
         with patch('scheduler.resolve_pipeline_context', return_value={

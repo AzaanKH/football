@@ -196,13 +196,49 @@ def job_sync_prediction_context():
             )
         logger.info(f"Syncing matchups and projections for {season} Week {prediction_week}")
 
+        # Independent feeds: a matchup failure must not block projections,
+        # which are the point estimate
+        results = {}
         with DataOrchestrator() as orchestrator:
-            return {
-                'matchups': orchestrator.sync_matchups(season, prediction_week),
-                'projections': orchestrator.sync_projections(season, prediction_week),
-            }
+            for name, sync in (('matchups', orchestrator.sync_matchups),
+                               ('projections', orchestrator.sync_projections)):
+                try:
+                    results[name] = sync(season, prediction_week)
+                except Exception as e:
+                    logger.error(f"{name} sync failed for {season} Week {prediction_week}: {e}")
+                    results[name] = {'status': 'failed', 'error': str(e)}
+
+        if all(r.get('status') == 'failed' for r in results.values()):
+            raise RuntimeError(f"Prediction-context sync failed: {results}")
+        return results
     except Exception as e:
         logger.error(f"Prediction-context sync failed: {e}")
+        raise
+
+
+def job_refresh_projections():
+    """
+    Scheduled job: re-sync Sleeper projections for the upcoming week.
+
+    Sleeper revises projections through the week as injury and depth-chart
+    news lands; they are the point estimate, so keep them current.
+    """
+    try:
+        from data_pipeline import DataOrchestrator
+
+        context = resolve_pipeline_context()
+        season = context['season']
+        prediction_week = context['prediction_week']
+        if _is_offseason(context):
+            return _skipped("Offseason detected; no projections to refresh",
+                            season=season, prediction_week=prediction_week)
+
+        with DataOrchestrator() as orchestrator:
+            stats = orchestrator.sync_projections(season, prediction_week)
+        logger.info(f"Refreshed projections for {season} Week {prediction_week}: {stats}")
+        return stats
+    except Exception as e:
+        logger.error(f"Projection refresh failed: {e}")
         raise
 
 
@@ -326,6 +362,26 @@ class FantasyScheduler:
             CronTrigger(day_of_week='tue', hour=6, minute=30),
             id='sync_prediction_context',
             name='Weekly Prediction Context Sync',
+            replace_existing=True,
+            max_instances=1
+        )
+
+        # Daily projection refresh at 10:00 AM ET (injury/depth-chart news)
+        self.scheduler.add_job(
+            job_refresh_projections,
+            CronTrigger(hour=10, minute=0),
+            id='refresh_projections',
+            name='Daily Projection Refresh',
+            replace_existing=True,
+            max_instances=1
+        )
+
+        # Sunday 11:45 AM ET: after inactives are announced, before 1 PM kickoffs
+        self.scheduler.add_job(
+            job_refresh_projections,
+            CronTrigger(day_of_week='sun', hour=11, minute=45),
+            id='refresh_projections_gameday',
+            name='Gameday Projection Refresh',
             replace_existing=True,
             max_instances=1
         )

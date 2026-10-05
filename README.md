@@ -1,6 +1,6 @@
 # Fantasy Football Predictor
 
-A machine learning-powered fantasy football prediction application for weekly start/sit decisions. The current backend uses separate XGBoost models by position and trains on historical NFL data with rolling features, reliability flags, and matchup context.
+A fantasy football prediction application for weekly start/sit decisions. Point estimates are anchored on Sleeper's weekly projections (with a learned correction only where it measurably helps); the app adds calibrated 80% ranges, explanations, and a comparison UI. Every modeling choice is checked against baselines with `backend/evaluation.py`.
 
 ## Features
 
@@ -38,11 +38,11 @@ Compare players with predicted points, confidence ranges, and 3-game averages.
 - **API**: Flask backend in `backend/app.py`
 - **Database**: PostgreSQL in Docker Desktop (TimescaleDB image, plain tables)
 - **Data Pipeline**: Sleeper + ESPN integrations in `backend/data_pipeline/`
-- **Models**: Position-specific XGBoost weekly predictor in `backend/weekly_predictor.py`
+- **Models**: Position-specific weekly predictor in `backend/weekly_predictor.py`; evaluation in `backend/evaluation.py`
 
 ## Backend Overview
 
-The backend now serves a single weekly prediction system built on Postgres feature engineering and position-specific XGBoost models.
+The backend serves a single weekly prediction system built on Postgres feature engineering, Sleeper projections, and position-specific models.
 
 - The current weekly prediction API is `POST /predict_week`
 - The newer pipeline stores player data, stats, projections, features, and matchup context in Postgres
@@ -226,12 +226,45 @@ curl -X POST http://localhost:5001/predict_week \
 
 ## Model Training
 
-The current weekly predictor:
+Per position (`qb`, `rb`, `wr`), the weekly predictor:
 
-- trains separate models for `qb`, `rb`, and `wr`
-- uses temporal train/test splitting instead of random row splitting
-- supports walk-forward backtesting
-- saves trained artifacts to `backend/models/weekly_predictor.pkl`
+- **Point estimate**: Sleeper's pre-game PPR projection. A shallow correction
+  model (actual − projection) is kept only if it lowers MAE without hurting
+  start/sit accuracy on the latest calibration weeks; otherwise Sleeper's
+  projection is used as-is. Players without a projection fall back to a
+  standalone XGBoost model on the engineered features.
+- **80% range**: 10th/90th percentile models, conformally calibrated
+  (CQR) on the latest weeks so the range actually covers ~80% of outcomes.
+- **Training**: temporal splits only; measures on held-out weeks, then refits
+  on all weeks before saving to `backend/models/weekly_predictor.pkl`.
+- Targets and features use only games the player actually played (see
+  migration `004`).
+
+### Evaluation (held-out 2025 weeks 5-18, played games)
+
+| Position | Method | MAE | Start/sit accuracy | 80% range coverage |
+|----------|--------|-----|--------------------|--------------------|
+| QB | 3-game average | 6.82 | 59.7% | |
+| QB | Previous standalone model | 6.35 | 61.2% | 70.5% |
+| QB | **Current** | **5.83** | **62.2%** | 76.4% |
+| RB | 3-game average | 5.35 | 68.3% | |
+| RB | Previous standalone model | 5.02 | 70.4% | 75.0% |
+| RB | **Current** | **4.69** | **74.3%** | 77.8% |
+| WR | 3-game average | 5.05 | 65.6% | |
+| WR | Previous standalone model | 4.74 | 67.9% | 74.1% |
+| WR | **Current** | **4.54** | **70.9%** | 81.0% |
+
+Start/sit accuracy: among startable players (Sleeper projection >= 5) in the
+same week and position, the share of pairs whose actual scores differ by at
+least 3 points where the higher scorer was ranked first. Engineered features
+did not measurably beat Sleeper's projection on their own; see
+`backend/evaluation.py` to test new features against this bar:
+
+```bash
+cd backend
+python evaluation.py          # all positions
+python evaluation.py rb wr    # selected positions
+```
 
 ## Development
 

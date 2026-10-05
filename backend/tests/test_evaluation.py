@@ -6,13 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from evaluation import DECISION_MARGIN, START_POOL_MIN_PROJ, score, start_sit_accuracy
+from metrics import DECISION_MARGIN, START_POOL_MIN_PROJ, score, start_sit_accuracy
 
 
 def _week(actuals, preds, sleeper=10.0, season=2025, week=5):
     return pd.DataFrame({
         'season': season, 'week': week,
-        'actual': actuals, 'pred': preds, 'sleeper': sleeper,
+        'actual': actuals, 'pred': preds, 'sleeper_proj': sleeper,
     })
 
 
@@ -61,3 +61,18 @@ class TestScore:
 
         assert result['mae'] == pytest.approx(3.0)
         assert result['rmse'] == pytest.approx(np.sqrt((4 + 16) / 2))
+
+
+class TestConformalAdjustment:
+    @pytest.mark.unit
+    def test_widens_too_narrow_and_narrows_too_wide_ranges(self):
+        from metrics import conformal_adjustment, interval_coverage
+        rng = np.random.default_rng(0)
+        actual = rng.normal(10, 5, 2000)
+
+        narrow = conformal_adjustment(actual, np.full(2000, 9.0), np.full(2000, 11.0), 0.8)
+        wide = conformal_adjustment(actual, np.full(2000, -20.0), np.full(2000, 40.0), 0.8)
+
+        assert narrow > 0 > wide
+        assert interval_coverage(actual, 9.0 - narrow, 11.0 + narrow) == pytest.approx(0.80, abs=0.02)
+        assert interval_coverage(actual, -20.0 - wide, 40.0 + wide) == pytest.approx(0.80, abs=0.02)

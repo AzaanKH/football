@@ -8,13 +8,13 @@ Methods (all scored on the same rows):
     model       WeeklyPredictor fit only on weeks before the held-out weeks
     avg_3       3-game average PPR (from the stored features)
     avg_5       5-game average PPR
-    sleeper     Sleeper's own weekly PPR projection
+    sleeper_proj  Sleeper's own weekly PPR projection
 
 Metrics:
     MAE / RMSE  point accuracy on played games
-    start/sit   among startable players (Sleeper projection >= START_POOL_MIN_PROJ)
+    start/sit   among startable players (Sleeper projection >= metrics.START_POOL_MIN_PROJ)
                 in the same week and position, every pair whose actual scores
-                differ by >= DECISION_MARGIN: how often the method ranks the
+                differ by >= metrics.DECISION_MARGIN: how often the method ranks the
                 higher scorer first (ties count half)
     coverage    share of actual scores inside the model's 80% range, and its
                 mean width
@@ -28,66 +28,25 @@ import logging
 import sys
 from typing import Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 
-from weekly_predictor import WeeklyPredictor, get_db_connection
+from metrics import interval_coverage, score
+from weekly_predictor import SLEEPER_FEATURE, WeeklyPredictor, get_db_connection
 
 logger = logging.getLogger(__name__)
 
 POSITIONS = ('qb', 'rb', 'wr')
-START_POOL_MIN_PROJ = 5.0
-DECISION_MARGIN = 3.0
-BASELINES = ('avg_3', 'avg_5', 'sleeper')
+BASELINES = ('avg_3', 'avg_5', SLEEPER_FEATURE)
 
 
 def load_evaluation_frame(predictor: WeeklyPredictor, position: str) -> pd.DataFrame:
     """Played games with features, actual points and Sleeper's projection."""
     df = predictor._load_training_frame(position)
-    cursor = predictor.db_connection.cursor()
-    cursor.execute("""
-        SELECT pp.player_id, pp.season, pp.week, pp.projected_points_ppr
-        FROM player_projections pp
-        JOIN players p ON p.player_id = pp.player_id
-        WHERE p.position = %s AND pp.source = 'sleeper'
-    """, (position.upper(),))
-    projections = pd.DataFrame(cursor.fetchall(),
-                               columns=['player_id', 'season', 'week', 'sleeper'])
-    df = df.merge(projections, on=['player_id', 'season', 'week'], how='left')
-
     df['actual'] = pd.to_numeric(df['actual_points'], errors='coerce')
     df['avg_3'] = pd.to_numeric(df['fantasy_pts_avg_3'], errors='coerce')
     df['avg_5'] = pd.to_numeric(df['fantasy_pts_avg_5'], errors='coerce')
-    df['sleeper'] = pd.to_numeric(df['sleeper'], errors='coerce')
+    df[SLEEPER_FEATURE] = pd.to_numeric(df[SLEEPER_FEATURE], errors='coerce')
     return df
-
-
-def start_sit_accuracy(df: pd.DataFrame, pred_col: str) -> float:
-    """Pairwise ranking accuracy on meaningful start/sit decisions."""
-    correct, total = 0.0, 0
-    pool = df[df['sleeper'] >= START_POOL_MIN_PROJ]
-    for _, week in pool.groupby(['season', 'week']):
-        actual = week['actual'].to_numpy()
-        pred = week[pred_col].to_numpy()
-        diff_actual = actual[:, None] - actual[None, :]
-        diff_pred = pred[:, None] - pred[None, :]
-        decisions = np.triu(np.abs(diff_actual) >= DECISION_MARGIN, k=1)
-        if not decisions.any():
-            continue
-        agree = np.sign(diff_actual[decisions]) == np.sign(diff_pred[decisions])
-        tie = diff_pred[decisions] == 0
-        correct += agree.sum() + 0.5 * tie.sum()
-        total += decisions.sum()
-    return correct / total if total else float('nan')
-
-
-def score(df: pd.DataFrame, pred_col: str) -> Dict[str, float]:
-    error = df[pred_col] - df['actual']
-    return {
-        'mae': float(error.abs().mean()),
-        'rmse': float(np.sqrt((error ** 2).mean())),
-        'start_sit': float(start_sit_accuracy(df, pred_col)),
-    }
 
 
 def evaluate_position(predictor: WeeklyPredictor, position: str,
@@ -108,7 +67,7 @@ def evaluate_position(predictor: WeeklyPredictor, position: str,
     meta = df[['season', 'week']]
     X_train, X_test, y_train, _ = predictor._temporal_train_test_split(X, y, meta, test_ratio)
 
-    predictor.fit(position, X_train, y_train)
+    predictor.fit(position, X_train, y_train, meta.loc[X_train.index])
     test = df.loc[X_test.index].copy()
     bounds = predictor.predict_with_confidence(position, test)
     test['model'] = [b['predicted_points'] for b in bounds]
@@ -118,7 +77,6 @@ def evaluate_position(predictor: WeeklyPredictor, position: str,
     # Every method on the same rows: games where all baselines exist
     common = test.dropna(subset=list(BASELINES))
     results = {method: score(common, method) for method in ('model',) + BASELINES}
-    inside = (test['actual'] >= test['low']) & (test['actual'] <= test['high'])
 
     return {
         'position': position,
@@ -127,8 +85,9 @@ def evaluate_position(predictor: WeeklyPredictor, position: str,
         'weeks': f"{test['season'].min()} W{test[test['season'] == test['season'].min()]['week'].min()}"
                  f" - {test['season'].max()} W{test[test['season'] == test['season'].max()]['week'].max()}",
         'methods': results,
+        'point_strategy': predictor.point_strategy.get(position),
         'interval': {
-            'coverage_80': float(inside.mean()),
+            'coverage_80': interval_coverage(test['actual'], test['low'], test['high']),
             'mean_width': float((test['high'] - test['low']).mean()),
         },
         'features': columns,
@@ -139,9 +98,10 @@ def print_report(reports: List[Dict]) -> None:
     for report in reports:
         print(f"\n{report['position'].upper()}  held-out {report['weeks']}  "
               f"({report['compared_games']} of {report['test_games']} games have every baseline)")
-        print(f"  {'method':10} {'MAE':>6} {'RMSE':>6} {'start/sit':>10}")
+        print(f"  model point strategy: {report['point_strategy']}")
+        print(f"  {'method':13} {'MAE':>6} {'RMSE':>6} {'start/sit':>10}")
         for method, metrics in report['methods'].items():
-            print(f"  {method:10} {metrics['mae']:6.2f} {metrics['rmse']:6.2f} "
+            print(f"  {method:13} {metrics['mae']:6.2f} {metrics['rmse']:6.2f} "
                   f"{metrics['start_sit']:10.1%}")
         interval = report['interval']
         print(f"  80% range: coverage {interval['coverage_80']:.1%}, "
