@@ -106,6 +106,45 @@ class TestValidation:
         assert 'error' in response.get_json()
 
 
+class TestPlayerSearchAndSeasons:
+    @pytest.mark.unit
+    def test_players_for_a_week_are_predictable_and_ranked(self, client, pool):
+        cursor = pool.conn.cursor.return_value
+        cursor.fetchall.return_value = [('4034', 'A Player', 'PHI', 'RB')]
+
+        response = client.get('/players?position=rb&season=2025&week=6&search=phi&limit=25')
+
+        assert response.status_code == 200
+        sql, params = cursor.execute.call_args.args
+        assert 'JOIN player_features' in sql
+        assert 'ORDER BY pf.fantasy_pts_avg_3 DESC' in sql
+        assert params == [2025, 6, 'RB', '%phi%', 'phi', 25]
+        assert response.get_json()[0]['player_id'] == '4034'
+
+    @pytest.mark.unit
+    def test_players_without_week_lists_everyone(self, client, pool):
+        cursor = pool.conn.cursor.return_value
+        cursor.fetchall.return_value = []
+
+        client.get('/players?position=qb')
+
+        sql, params = cursor.execute.call_args.args
+        assert 'player_features' not in sql
+        assert params == ['QB', 100]
+
+    @pytest.mark.unit
+    def test_seasons_default_is_newest_season_with_data(self, client, pool):
+        pool.conn.cursor.return_value.fetchall.return_value = [(2025,), (2024,)]
+
+        assert client.get('/seasons').get_json() == {'seasons': [2025, 2024], 'default': 2025}
+
+    @pytest.mark.unit
+    def test_seasons_falls_back_when_no_data(self, client, pool):
+        pool.conn.cursor.return_value.fetchall.return_value = []
+
+        assert client.get('/seasons').get_json()['default'] == api.DEFAULT_SEASON
+
+
 class TestDatabaseAvailability:
     @pytest.mark.unit
     def test_database_down_returns_503_not_500(self, client, monkeypatch):

@@ -120,6 +120,12 @@ npm install
 npm start
 ```
 
+The frontend calls `http://localhost:5001` by default. To point it elsewhere,
+set `REACT_APP_API_BASE` (e.g. in `frontend/fantasy-football/.env.local`).
+The season and weeks shown come from the data the backend has.
+
+Frontend tests: `CI=true npm test`.
+
 ### 7. Open the app
 
 Navigate to <http://localhost:3000>
