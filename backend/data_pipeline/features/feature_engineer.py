@@ -130,6 +130,9 @@ class FeatureEngineer:
         logger.info(f"Computing features for {len(player_contexts)} players ({season} W{week})")
 
         for i, player_context in enumerate(player_contexts):
+            # A failed statement aborts the whole transaction in PostgreSQL;
+            # a savepoint per player keeps one bad row from failing the rest.
+            self.cursor.execute("SAVEPOINT player_features")
             try:
                 features = self.compute_player_features(
                     player_context['player_id'],
@@ -145,6 +148,7 @@ class FeatureEngineer:
                     stats['inserted'] += 1
                 elif result == 'updated':
                     stats['updated'] += 1
+                self.cursor.execute("RELEASE SAVEPOINT player_features")
 
                 # Progress logging every 100 players
                 if (i + 1) % 100 == 0:
@@ -152,6 +156,7 @@ class FeatureEngineer:
                     logger.info(f"  Progress: {i + 1}/{len(player_contexts)} ({elapsed:.1f}s)")
 
             except Exception as e:
+                self.cursor.execute("ROLLBACK TO SAVEPOINT player_features")
                 logger.error(f"Error computing features for {player_context['player_id']}: {e}")
                 stats['errors'] += 1
 

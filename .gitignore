@@ -33,3 +33,6 @@ Thumbs.db
 
 # Docker volumes
 postgres_data/
+
+# Local database backups
+backend/backups/
