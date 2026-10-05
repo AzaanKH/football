@@ -321,17 +321,67 @@ class WeeklyPredictor:
 
         return X[train_mask], X[test_mask], y[train_mask], y[test_mask]
 
-    def train(self, position: str, X: pd.DataFrame = None, y: pd.Series = None) -> Dict:
+    @staticmethod
+    def _new_point_model() -> XGBRegressor:
+        return XGBRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1
+        )
+
+    @staticmethod
+    def _new_quantile_model(quantile: float) -> HistGradientBoostingRegressor:
+        # HistGradientBoosting handles NaN natively
+        return HistGradientBoostingRegressor(
+            loss='quantile',
+            quantile=quantile,
+            max_iter=100,
+            max_depth=3,
+            learning_rate=0.1,
+            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
+            random_state=42
+        )
+
+    def fit(self, position: str, X: pd.DataFrame, y: pd.Series) -> None:
+        """
+        Fit the point and 10th/90th percentile models on exactly the rows given.
+
+        The columns of X become this position's saved feature list.
+        """
+        position = position.lower()
+        model = self._new_point_model()
+        model.fit(X, y)
+        lower_model = self._new_quantile_model(0.10)
+        lower_model.fit(X, y)
+        upper_model = self._new_quantile_model(0.90)
+        upper_model.fit(X, y)
+
+        self.models[position] = model
+        self.quantile_models[position] = {'lower': lower_model, 'upper': upper_model}
+        self.feature_columns[position] = list(X.columns)
+        self._is_trained = True
+
+    def train(self, position: str, X: pd.DataFrame = None, y: pd.Series = None,
+              refit_full: bool = True) -> Dict:
         """
         Train prediction model for a position.
+
+        Fits on older weeks and measures on the held-out latest weeks; then,
+        unless refit_full is False, refits on every week so the saved model
+        also learns from the most recent games.
 
         Args:
             position: 'qb', 'rb', or 'wr'
             X: Optional feature DataFrame (if not provided, queries DB)
             y: Optional target Series
+            refit_full: Refit on all rows after evaluation
 
         Returns:
-            Training metrics dictionary
+            Training metrics dictionary (measured on the held-out weeks)
         """
         position = position.lower()
 
@@ -343,60 +393,20 @@ class WeeklyPredictor:
         logger.info(f"Training {position.upper()} model with {len(X)} samples, {len(X.columns)} features")
 
         X_train, X_test, y_train, y_test = self._temporal_train_test_split(X, y, meta)
+        self.fit(position, X_train, y_train)
 
-        # Train main model
-        model = XGBRegressor(
-            n_estimators=200,
-            learning_rate=0.05,
-            max_depth=4,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            n_jobs=-1
-        )
-        model.fit(X_train, y_train)
-        self.models[position] = model
-        self.feature_columns[position] = list(X.columns)
-
-        # Train quantile models for confidence intervals
-        self.quantile_models[position] = {}
-
-        # Lower bound (10th percentile). HistGradientBoosting handles NaN natively.
-        lower_model = HistGradientBoostingRegressor(
-            loss='quantile',
-            quantile=0.10,
-            max_iter=100,
-            max_depth=3,
-            learning_rate=0.1,
-            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
-            random_state=42
-        )
-        lower_model.fit(X_train, y_train)
-        self.quantile_models[position]['lower'] = lower_model
-
-        # Upper bound (90th percentile)
-        upper_model = HistGradientBoostingRegressor(
-            loss='quantile',
-            quantile=0.90,
-            max_iter=100,
-            max_depth=3,
-            learning_rate=0.1,
-            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
-            random_state=42
-        )
-        upper_model.fit(X_train, y_train)
-        self.quantile_models[position]['upper'] = upper_model
-
-        # Evaluate
+        # Evaluate on held-out weeks
+        model = self.models[position]
         y_pred = model.predict(X_test)
         metrics = {
             'mae': mean_absolute_error(y_test, y_pred),
             'rmse': np.sqrt(mean_squared_error(y_test, y_pred)),
             'r2': r2_score(y_test, y_pred),
             'samples': len(X),
-            'features': list(X.columns)
+            'test_samples': len(X_test),
+            'features': list(X.columns),
+            'refit_on_all_weeks': refit_full,
         }
-        self.training_metrics[position] = metrics
 
         logger.info(f"{position.upper()} - MAE: {metrics['mae']:.2f}, RMSE: {metrics['rmse']:.2f}, R²: {metrics['r2']:.3f}")
 
@@ -410,7 +420,10 @@ class WeeklyPredictor:
         for _, row in importance.head().iterrows():
             logger.info(f"  {row['feature']}: {row['importance']:.4f}")
 
-        self._is_trained = True
+        if refit_full:
+            self.fit(position, X, y)
+
+        self.training_metrics[position] = metrics
         return metrics
 
     def train_all_positions(self) -> Dict[str, Dict]:
@@ -748,15 +761,7 @@ class WeeklyPredictor:
             if not train_mask.any() or not test_mask.any():
                 continue
 
-            model = XGBRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=4,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42,
-                n_jobs=-1
-            )
+            model = self._new_point_model()
             model.fit(X[train_mask], y[train_mask])
             y_pred = model.predict(X[test_mask])
             y_true = y[test_mask]
