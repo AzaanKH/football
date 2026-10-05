@@ -321,4 +321,11 @@ def get_player_features(player_id):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Localhost-only with debugger off by default: the Werkzeug debugger allows
+    # arbitrary code execution, so never expose it on the network.
+    # Opt in with FLASK_DEBUG=1 and/or FLASK_HOST=0.0.0.0.
+    app.run(
+        host=os.environ.get('FLASK_HOST', '127.0.0.1'),
+        port=int(os.environ.get('FLASK_PORT', 5001)),
+        debug=os.environ.get('FLASK_DEBUG', '0').lower() in ('1', 'true', 'yes'),
+    )
