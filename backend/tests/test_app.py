@@ -29,6 +29,19 @@ class FakePool:
         self.returned.append((conn, close))
 
 
+CURRENT_WEEK = {'season': 2026, 'week': 5, 'season_type': 'regular'}
+# Real implementations, captured before the autouse fixture stubs them
+REAL_DATA_FRESHNESS = api.data_freshness
+REAL_CURRENT_NFL_WEEK = api.current_nfl_week
+
+
+@pytest.fixture(autouse=True)
+def offline_context(monkeypatch):
+    """No network in unit tests: stub Sleeper's NFL state and freshness lookup."""
+    monkeypatch.setattr(api, 'current_nfl_week', lambda: CURRENT_WEEK)
+    monkeypatch.setattr(api, 'data_freshness', lambda conn, season, week: {'stub': True})
+
+
 @pytest.fixture
 def pool(monkeypatch):
     fake = FakePool()
@@ -136,7 +149,9 @@ class TestPlayerSearchAndSeasons:
     def test_seasons_default_is_newest_season_with_data(self, client, pool):
         pool.conn.cursor.return_value.fetchall.return_value = [(2025,), (2024,)]
 
-        assert client.get('/seasons').get_json() == {'seasons': [2025, 2024], 'default': 2025}
+        assert client.get('/seasons').get_json() == {
+            'seasons': [2025, 2024], 'default': 2025, 'current_week': CURRENT_WEEK,
+        }
 
     @pytest.mark.unit
     def test_seasons_falls_back_when_no_data(self, client, pool):
@@ -185,6 +200,9 @@ class TestConnectionLifecycle:
         data = response.get_json()
         assert [p['player_id'] for p in data['predictions']] == ['4034']
         assert data['unavailable'][0]['reason'] == 'unknown_player'
+        assert data['scoring'] == 'ppr'
+        assert data['freshness'] == {'stub': True}
+        assert data['current_week'] == CURRENT_WEEK
 
     @pytest.mark.unit
     def test_connection_returned_and_error_not_leaked_on_failure(self, client, pool, predictor):
@@ -309,3 +327,58 @@ class TestPredictorPersistence:
         assert view.db_connection == 'conn-a'
         assert predictor.db_connection is None
         assert view.models is predictor.models
+
+
+
+class TestUIContext:
+    @pytest.mark.unit
+    def test_data_freshness_reports_utc_times_and_latest_stats_week(self, monkeypatch, tmp_path):
+        from datetime import datetime
+        model = tmp_path / 'model.pkl'
+        model.write_bytes(b'x')
+        monkeypatch.setattr(api, 'MODEL_PATH', str(model))
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            (datetime(2026, 10, 5, 8, 30), datetime(2026, 1, 13, 3, 56), None),
+            (2025, 18),
+        ]
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        result = REAL_DATA_FRESHNESS(conn, 2025, 18)
+
+        assert result['projections_synced_at'] == '2026-10-05T08:30:00Z'
+        assert result['stats_synced_at'] == '2026-01-13T03:56:00Z'
+        assert result['players_synced_at'] is None
+        assert result['stats_through'] == {'season': 2025, 'week': 18}
+        assert result['model_trained_at'].endswith('Z')
+
+    @pytest.mark.unit
+    def test_current_nfl_week_is_cached_and_survives_sleeper_outage(self, monkeypatch):
+        import sys
+        calls = []
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def get_nfl_state(self):
+                calls.append(1)
+                if len(calls) > 1:
+                    raise RuntimeError('sleeper down')
+                return {'season': '2026', 'week': 5, 'season_type': 'regular'}
+
+        monkeypatch.setitem(sys.modules, 'data_pipeline.sleeper_client',
+                            MagicMock(SleeperClient=FakeClient))
+        monkeypatch.setattr(api, '_nfl_state', {'value': None, 'expires': 0.0})
+
+        expected = {'season': 2026, 'week': 5, 'season_type': 'regular'}
+        assert REAL_CURRENT_NFL_WEEK() == expected
+        assert REAL_CURRENT_NFL_WEEK() == expected
+        assert len(calls) == 1  # served from cache
+
+        api._nfl_state['expires'] = 0.0  # cache expired, Sleeper now down
+        assert REAL_CURRENT_NFL_WEEK() is None

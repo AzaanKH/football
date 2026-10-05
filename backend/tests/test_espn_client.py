@@ -185,6 +185,29 @@ class TestESPNClientUnit:
         assert result[1]['is_home'] is False
 
     @pytest.mark.unit
+    def test_get_week_matchups_uses_nfl_scoreboard_and_sleeper_abbreviations(self, mock_client):
+        """Matchups come from the NFL scoreboard; team codes match the players table."""
+        client, http_mock = mock_client
+        response_mock = MagicMock()
+        response_mock.json.return_value = {'events': [{
+            'date': '2025-10-05T17:00Z',
+            'competitions': [{'competitors': [
+                {'homeAway': 'home', 'team': {'abbreviation': 'WSH'}},
+                {'homeAway': 'away', 'team': {'abbreviation': 'LAC'}},
+            ]}],
+        }]}
+        response_mock.raise_for_status = MagicMock()
+        http_mock.get.return_value = response_mock
+
+        result = client.get_week_matchups(season=2025, week=5)
+
+        url = http_mock.get.call_args.args[0]
+        assert url.endswith('/site/v2/sports/football/nfl/scoreboard')
+        assert http_mock.get.call_args.kwargs['params']['week'] == 5
+        assert {r['team'] for r in result} == {'WAS', 'LAC'}
+        assert next(r for r in result if r['team'] == 'LAC')['opponent'] == 'WAS'
+
+    @pytest.mark.unit
     def test_get_league_data_success(self, mock_client):
         """Test fetching league data."""
         client, http_mock = mock_client

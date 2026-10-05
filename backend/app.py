@@ -4,6 +4,8 @@ from contextlib import contextmanager
 import os
 import logging
 import threading
+import time
+from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2 import pool as pg_pool
@@ -189,6 +191,88 @@ def handle_unexpected(e):
     return jsonify({'error': 'Internal server error'}), 500
 
 
+# ============================================================================
+# Context for the UI: current NFL week and data freshness
+# ============================================================================
+
+NFL_STATE_TTL_SECONDS = 3600
+NFL_STATE_RETRY_SECONDS = 300
+_nfl_state = {'value': None, 'expires': 0.0}
+_nfl_state_lock = threading.Lock()
+
+
+def current_nfl_week():
+    """
+    {season, week, season_type} from Sleeper, cached for an hour.
+
+    Returns None if Sleeper is unreachable (retried after a few minutes),
+    so the API keeps working offline.
+    """
+    with _nfl_state_lock:
+        if time.time() < _nfl_state['expires']:
+            return _nfl_state['value']
+        try:
+            from data_pipeline.sleeper_client import SleeperClient
+            with SleeperClient() as client:
+                state = client.get_nfl_state() or {}
+            value = {
+                'season': int(state['season']),
+                'week': int(state['week']),
+                'season_type': state.get('season_type'),
+            }
+            ttl = NFL_STATE_TTL_SECONDS
+        except Exception as e:
+            logger.warning(f"Could not fetch current NFL week: {e}")
+            value, ttl = None, NFL_STATE_RETRY_SECONDS
+        _nfl_state.update(value=value, expires=time.time() + ttl)
+        return value
+
+
+def _utc_iso(value):
+    """Naive UTC timestamps (DB) or POSIX times -> ISO 8601 with Z, or None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        value = datetime.fromtimestamp(value, tz=timezone.utc)
+    elif value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def data_freshness(conn, season: int, week: int) -> dict:
+    """When each input was last refreshed, for the UI's freshness line."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            MAX(completed_at) FILTER (WHERE data_type = 'projections'
+                                      AND season = %s AND week = %s),
+            MAX(completed_at) FILTER (WHERE data_type = 'stats'),
+            MAX(completed_at) FILTER (WHERE data_type = 'players')
+        FROM ingestion_log
+        WHERE status = 'completed'
+    """, (season, week))
+    projections_at, stats_at, players_at = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT season, week FROM player_weekly_stats
+        ORDER BY season DESC, week DESC LIMIT 1
+    """)
+    latest = cursor.fetchone()
+
+    try:
+        model_at = os.path.getmtime(MODEL_PATH)
+    except OSError:
+        model_at = None
+
+    return {
+        'projections_synced_at': _utc_iso(projections_at),
+        'stats_synced_at': _utc_iso(stats_at),
+        'players_synced_at': _utc_iso(players_at),
+        'stats_through': {'season': latest[0], 'week': latest[1]} if latest else None,
+        'model_trained_at': _utc_iso(model_at),
+    }
+
+
 def _require_model():
     predictor = model_store.get()
     if predictor is None:
@@ -335,6 +419,7 @@ def predict_week():
             week=week,
             position=position
         )
+        freshness = data_freshness(conn, season, week)
 
     # Every requested player appears in exactly one list
     results = []
@@ -347,7 +432,8 @@ def predict_week():
                 'predicted_points': pred.predicted_points,
                 'confidence_low': pred.confidence_low,
                 'confidence_high': pred.confidence_high,
-                'features': pred.features_used
+                'features': pred.features_used,
+                'context': pred.context,
             })
         else:
             unavailable.append({
@@ -355,14 +441,19 @@ def predict_week():
                 'player_name': pred.player_name,
                 'reason': pred.reason,
                 'message': pred.message,
+                'context': pred.context,
             })
 
     return jsonify({
         'week': week,
         'season': season,
         'position': position,
+        'scoring': 'ppr',
         'predictions': results,
-        'unavailable': unavailable
+        'unavailable': unavailable,
+        'freshness': freshness,
+        # Injury statuses are current; only meaningful when this is the current week
+        'current_week': current_nfl_week(),
     })
 
 
@@ -383,6 +474,7 @@ def seasons():
     return jsonify({
         'seasons': available,
         'default': available[0] if available else DEFAULT_SEASON,
+        'current_week': current_nfl_week(),
     })
 
 

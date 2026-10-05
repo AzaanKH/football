@@ -361,3 +361,45 @@ class TestSleeperAnchoredFit:
         assert result.features_used['sleeper_projection'] == 16.5
         assert result.features_used['projection_source'] == 'sleeper'
         assert result.confidence_low <= 16.5 <= result.confidence_high
+
+
+class TestGameContext:
+    SCHEDULE = {
+        'PHI': {'opponent': 'DAL', 'is_home': True, 'kickoff': '2025-10-05T17:00:00'},
+        'MIN': {'opponent': 'GB', 'is_home': False, 'kickoff': '2025-10-05T20:25:00'},
+    }
+
+    @pytest.mark.unit
+    def test_players_on_bye_are_unavailable_with_context(self):
+        predictor = _predictor_with_models()
+        features = pd.DataFrame([
+            {'player_id': 'rb1', 'games_played_prior': 6},
+            {'player_id': 'rb_rookie', 'games_played_prior': 6},  # NYG: no game -> bye
+        ])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA), \
+             patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE), \
+             patch.object(predictor, 'get_player_features', return_value=features):
+            results = predictor.predict_week(['rb1', 'rb_rookie'], season=2025, week=5)
+
+        by_id = {r.player_id: r for r in results}
+        assert by_id['rb1'].status == 'ok'
+        assert by_id['rb1'].context == {
+            'team': 'PHI', 'opponent': 'DAL', 'is_home': True,
+            'kickoff': '2025-10-05T17:00:00', 'injury_status': None,
+        }
+        assert by_id['rb_rookie'].reason == 'bye'
+        assert by_id['rb_rookie'].context['team'] == 'NYG'
+
+    @pytest.mark.unit
+    def test_no_bye_inferred_when_schedule_not_synced(self):
+        predictor = _predictor_with_models()
+        features = pd.DataFrame([{'player_id': 'rb_rookie', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA), \
+             patch.object(predictor, '_get_schedule', return_value={}), \
+             patch.object(predictor, 'get_player_features', return_value=features):
+            [result] = predictor.predict_week(['rb_rookie'], season=2025, week=5)
+
+        assert result.status == 'ok'
+        assert result.context['opponent'] is None

@@ -18,6 +18,10 @@ import time
 logger = logging.getLogger(__name__)
 
 
+# ESPN team abbreviations that differ from Sleeper's (the players table uses Sleeper's)
+ESPN_TO_SLEEPER_TEAM = {'WSH': 'WAS'}
+
+
 class ESPNClient:
     """
     Client for the ESPN Fantasy Football API.
@@ -202,7 +206,8 @@ class ESPNClient:
         Returns:
             Scoreboard data or None
         """
-        url = f"{self.SITE_API_URL}/fantasy/v2/games/ffl/games"
+        # NFL scoreboard (the fantasy games endpoint returns no NFL schedule)
+        url = f"{self.SITE_API_URL}/site/v2/sports/football/nfl/scoreboard"
         params = {
             'dates': f'{season}',
             'seasontype': 2,
@@ -237,7 +242,7 @@ class ESPNClient:
                     if not abbreviation:
                         continue
                     teams.append({
-                        'team': abbreviation,
+                        'team': ESPN_TO_SLEEPER_TEAM.get(abbreviation, abbreviation),
                         'is_home': competitor.get('homeAway') == 'home',
                     })
 
