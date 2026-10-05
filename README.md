@@ -254,6 +254,18 @@ python run_tests.py e2e
 `python app.py` binds to `127.0.0.1` with the debugger off. Opt in with
 `FLASK_DEBUG=1` (never on a network-reachable host) or `FLASK_HOST=0.0.0.0`.
 
+The API reloads `models/weekly_predictor.pkl` automatically when it changes
+(e.g. after the scheduler's Tuesday retrain), so no restart is needed. The
+database is checked per request: if PostgreSQL is down, endpoints return 503
+and recover on their own once it is back.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MODEL_PATH` | `models/weekly_predictor.pkl` | Model file to serve |
+| `DEFAULT_SEASON` | `2025` | Season when a request omits it |
+| `DB_POOL_MAX` | `10` | Max pooled database connections |
+| `DB_POOL_WAIT_SECONDS` | `10` | How long a request waits for a free connection before a 503 |
+
 ### Backtest a position model
 
 ```bash
