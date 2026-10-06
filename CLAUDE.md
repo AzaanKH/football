@@ -154,6 +154,9 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
 - psycopg2 returns `Decimal`; convert (`_to_float`) before JSON or math.
 - Feature recompute is an upsert: after changing feature logic, rows it no
   longer produces stay stale; delete them (back up first).
+- Unit tests fit models single-threaded (`tests/conftest.py` sets
+  `PREDICTOR_N_JOBS=1`, `OMP_NUM_THREADS=1`): on tiny data, thread start-up
+  dominated and pushed tests past pytest's 60 s timeout on a busy machine.
 - Back up before destructive data operations
   (`pg_dump -t <table> -Fc` into `backend/backups/`, gitignored).
 
