@@ -189,7 +189,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
                   onFocus={() => setActive(p.playerId)}
                   onBlur={() => setActive(null)}
                   className={cn(
-                    'grid grid-cols-[1fr_3.5rem] gap-x-4 gap-y-2 rounded-md px-2 py-3 outline-none sm:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem] sm:items-center',
+                    'grid grid-cols-[1fr_3.5rem] gap-x-4 gap-y-2 rounded-md px-2 py-3 outline-hidden sm:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem] sm:items-center',
                     isActive && 'bg-sideline/70'
                   )}
                 >

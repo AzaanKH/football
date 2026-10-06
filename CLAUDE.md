@@ -45,7 +45,7 @@ football/
 │   ├── migrations/              001-004, applied manually to existing DBs
 │   ├── models/                  weekly_predictor.pkl (+ local backups; gitignored)
 │   └── tests/                   pytest: unit / integration / e2e
-├── frontend/fantasy-football/   React 18 + Vite, Tailwind 3, shadcn/ui (Radix, cmdk)
+├── frontend/fantasy-football/   React 18 + Vite, Tailwind 4, shadcn/ui (Radix, cmdk)
 │   ├── index.html, vite.config.mjs  Entry page; Vite + Vitest config
 │   └── src/
 │       ├── main.jsx             Entry point
@@ -178,8 +178,9 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
 **Frontend**
 - All requests go through `src/lib/api.js`. Results are stored with the request
   that produced them; outdated requests are cancelled with `AbortController`.
-- Design: turf palette in `tailwind.config.js` (validated with the dataviz
-  palette checker). Scrimmage blue `#3D8EF0` is the only data color; pylon
+- Design: turf palette in the `@theme` block of `src/index.css` (Tailwind 4,
+  CSS-first config; no tailwind.config.js), validated with the dataviz
+  palette checker. Scrimmage blue `#3D8EF0` is the only data color; pylon
   orange is only the primary button; flag yellow / out red are injury status
   only, always with an icon and label. Use the `frontend-design` skill for UI
   work.
@@ -214,6 +215,3 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
   traded players can show the wrong matchup for past weeks.
 - Injury status is current-only; the UI shows it only for the current week.
 - QB range coverage is ~76% vs the 80% target (calibration drift).
-- `npm audit` reports 5 high findings, all from Tailwind 3's build-time
-  file watcher (`braces` via chokidar/fast-glob); fixing them needs the
-  Tailwind 4 migration. They don't ship in the built app.
