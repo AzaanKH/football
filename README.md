@@ -93,10 +93,16 @@ PowerShell:
 Get-Content .\migrations\002_add_matchups_and_reliability_features.sql | docker exec -i football-db psql -U postgres -d football_dev
 Get-Content .\migrations\003_expand_player_status_columns.sql | docker exec -i football-db psql -U postgres -d football_dev
 Get-Content .\migrations\004_add_played_flag.sql | docker exec -i football-db psql -U postgres -d football_dev
+Get-Content .\migrations\005_add_game_context.sql | docker exec -i football-db psql -U postgres -d football_dev
 ```
 
 After applying `004`, recompute features (`python run_pipeline.py compute-all-features`)
 and retrain: features and training now ignore weeks a player didn't play.
+
+After applying `005`, re-sync past weeks so stats carry each game's team,
+opponent, date and snap counts (`python setup_season.py --sync --force`),
+then recompute features. This fills opponent-defense rank, snap share and
+real days of rest.
 
 ### 4. Catch up to the current season
 

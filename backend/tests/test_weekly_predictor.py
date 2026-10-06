@@ -175,6 +175,16 @@ class TestPredictWeekContract:
 
         assert pred['confidence_low'] <= pred['predicted_points'] <= pred['confidence_high']
 
+    @pytest.mark.unit
+    def test_range_can_go_below_zero(self):
+        """PPR points go negative (kneel-downs); a 0 floor broke backup-QB coverage."""
+        predictor = _predictor_with_models(point=0.5, low=-1.5, high=9.0)
+        features = pd.DataFrame([{'player_id': 'rb1', 'games_played_prior': 6}])
+
+        [pred] = predictor.predict_with_confidence('rb', features)
+
+        assert pred['confidence_low'] == pytest.approx(-1.5)
+
 
 class TestHasHistory:
     @pytest.mark.unit

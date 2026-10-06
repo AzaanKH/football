@@ -631,7 +631,9 @@ class WeeklyPredictor:
             high = max(float(upper_bounds[i]), point)
             results.append({
                 'predicted_points': point,
-                'confidence_low': max(0.0, low),  # Can't be negative
+                # No floor at 0: PPR points go negative (kneel-downs, turnovers),
+                # and clipping broke the calibrated coverage for backup QBs
+                'confidence_low': low,
                 'confidence_high': high,
                 'source': sources[i],
             })
@@ -759,11 +761,12 @@ class WeeklyPredictor:
             return {}
         cursor = self.db_connection.cursor()
         cursor.execute("""
-            SELECT opponent, is_home FROM team_weekly_matchups
+            SELECT opponent, is_home, (game_date AT TIME ZONE 'America/New_York')::date
+            FROM team_weekly_matchups
             WHERE team = %s AND season = %s AND week = %s
         """, (team, season, week))
         row = cursor.fetchone()
-        return {'opponent': row[0], 'is_home': row[1]} if row else {}
+        return {'opponent': row[0], 'is_home': row[1], 'game_date': row[2]} if row else {}
 
     @staticmethod
     def _unavailable(player_id: str, player_name: Optional[str], reason: str,

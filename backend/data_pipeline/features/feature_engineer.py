@@ -98,7 +98,8 @@ class FeatureEngineer:
         features.update(self.matchups.compute(
             player_id, season, week,
             opponent=matchup_info.get('opponent'),
-            is_home=matchup_info.get('is_home')
+            is_home=matchup_info.get('is_home'),
+            game_date=matchup_info.get('game_date'),
         ))
 
         return features
@@ -141,6 +142,7 @@ class FeatureEngineer:
                     matchup_info={
                         'opponent': player_context.get('opponent'),
                         'is_home': player_context.get('is_home'),
+                        'game_date': player_context.get('game_date'),
                     }
                 )
                 result = self._save_features(features)
@@ -194,10 +196,7 @@ class FeatureEngineer:
             weeks = self._get_weeks_with_data(season)
 
             for week in weeks:
-                # Skip week 1 (no prior data)
-                if week == 1:
-                    continue
-
+                # Week 1 included: rolling windows reach into the previous season
                 stats = self.compute_all_features(season, week, positions)
                 for key in total_stats:
                     total_stats[key] += stats[key]
@@ -221,16 +220,31 @@ class FeatureEngineer:
         Returns:
             List of player IDs
         """
+        # Opponent, home/away and date: the game the player actually played
+        # (per-game stats, right for traded players) when the week is done;
+        # otherwise the current team's schedule (upcoming week).
         query = """
-            SELECT DISTINCT
+            SELECT
                 p.player_id,
-                twm.opponent,
-                twm.is_home
+                COALESCE(cur.opponent, sched.opponent) AS opponent,
+                COALESCE(actual.is_home, sched.is_home) AS is_home,
+                COALESCE(
+                    cur.game_date,
+                    (sched.game_date AT TIME ZONE 'America/New_York')::date
+                ) AS game_date
             FROM players p
-            LEFT JOIN team_weekly_matchups twm
-                ON p.team = twm.team
-                AND twm.season = %s
-                AND twm.week = %s
+            LEFT JOIN player_weekly_stats cur
+                ON cur.player_id = p.player_id
+                AND cur.season = %s
+                AND cur.week = %s
+            LEFT JOIN team_weekly_matchups actual
+                ON actual.team = cur.team
+                AND actual.season = %s
+                AND actual.week = %s
+            LEFT JOIN team_weekly_matchups sched
+                ON sched.team = p.team
+                AND sched.season = %s
+                AND sched.week = %s
             WHERE EXISTS (
                 SELECT 1
                 FROM player_weekly_stats pws
@@ -239,7 +253,7 @@ class FeatureEngineer:
                   AND ((pws.season = %s AND pws.week < %s) OR pws.season < %s)
             )
         """
-        params = [season, week, season, week, season]
+        params = [season, week, season, week, season, week, season, week, season]
 
         if positions:
             placeholders = ','.join(['%s'] * len(positions))
@@ -249,7 +263,7 @@ class FeatureEngineer:
         self.cursor.execute(query, params)
         rows = self.cursor.fetchall()
         return [
-            {'player_id': row[0], 'opponent': row[1], 'is_home': row[2]}
+            {'player_id': row[0], 'opponent': row[1], 'is_home': row[2], 'game_date': row[3]}
             for row in rows
         ]
 
@@ -292,6 +306,7 @@ class FeatureEngineer:
             'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
             # Trends
             'fantasy_pts_trend_3', 'usage_trend_3', 'snap_share_trend_3', 'target_share_trend_3',
+            'snap_share_avg_3',
             # Matchups
             'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
         ]

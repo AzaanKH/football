@@ -44,6 +44,7 @@ class TrendFeatures:
             'usage_trend_3': None,
             'snap_share_trend_3': None,
             'target_share_trend_3': None,
+            'snap_share_avg_3': None,
         }
 
         # Get recent stats
@@ -66,13 +67,27 @@ class TrendFeatures:
         ]
         features['usage_trend_3'] = self._compute_slope(usage)
 
-        # Note: snap_share and target_share require team-level data
-        # which we don't currently have. Set to None for now.
-        # These could be added later when we have team snap counts
-        features['snap_share_trend_3'] = None
+        # Snap share: share of the team's offensive snaps, from per-game context.
+        # Games without snap counts are skipped rather than counted as 0.
+        shares = [self._snap_share(s) for s in recent]
+        shares = [x for x in shares if x is not None]
+        if shares:
+            features['snap_share_avg_3'] = Decimal(str(round(sum(shares) / len(shares), 4)))
+        if len(shares) >= 2:
+            features['snap_share_trend_3'] = self._compute_slope(shares)
+
+        # Target share needs team target totals per game (not computed yet)
         features['target_share_trend_3'] = None
 
         return features
+
+    @staticmethod
+    def _snap_share(stat: Dict) -> Optional[float]:
+        """Offensive snaps / team offensive snaps, or None without snap data."""
+        snaps, team_snaps = stat.get('off_snaps'), stat.get('team_off_snaps')
+        if snaps is None or not team_snaps:
+            return None
+        return min(1.0, float(snaps) / float(team_snaps))
 
     def _get_recent_stats(self, player_id: str, season: int, week: int) -> List[Dict]:
         """
@@ -89,7 +104,8 @@ class TrendFeatures:
         query = """
             SELECT
                 season, week, fantasy_points_ppr,
-                rushing_attempts, targets, receptions
+                rushing_attempts, targets, receptions,
+                off_snaps, team_off_snaps
             FROM player_weekly_stats
             WHERE player_id = %s
               AND played
@@ -100,7 +116,8 @@ class TrendFeatures:
         self.cursor.execute(query, (player_id, season, week, season))
         rows = self.cursor.fetchall()
 
-        columns = ['season', 'week', 'fantasy_points_ppr', 'rushing_attempts', 'targets', 'receptions']
+        columns = ['season', 'week', 'fantasy_points_ppr', 'rushing_attempts', 'targets', 'receptions',
+                   'off_snaps', 'team_off_snaps']
         stats = [dict(zip(columns, row)) for row in rows]
         return list(reversed(stats))  # Chronological order
 

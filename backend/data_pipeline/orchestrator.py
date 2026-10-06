@@ -245,7 +245,11 @@ class DataOrchestrator:
         'rushing_attempts', 'rushing_yards', 'rushing_tds', 'rushing_2pt',
         'targets', 'receptions', 'receiving_yards', 'receiving_tds', 'receiving_2pt',
         'fumbles', 'fumbles_lost', 'source',
+    ] + [
+        # Per-game context (merged from Sleeper's per-game stats when available)
+        'team', 'opponent', 'game_date', 'off_snaps', 'team_off_snaps',
     ]
+    GAME_CONTEXT_COLUMNS = ('team', 'opponent', 'game_date', 'off_snaps', 'team_off_snaps')
 
     @staticmethod
     def _known_player_ids(conn) -> set:
@@ -322,6 +326,12 @@ class DataOrchestrator:
                     for player_id, player_stats in weekly_stats.items()
                     if player_id in known_ids
                 ]
+                # Team/opponent/date/snaps for players who were active
+                if rows:
+                    game_context = self.sleeper.get_weekly_game_context(season, week)
+                    for row in rows:
+                        row.update(game_context.get(row['player_id'], {}))
+                    stats['with_context'] = sum(1 for r in rows if r.get('opponent'))
                 if stats['skipped_unknown']:
                     logger.info(f"Skipped {stats['skipped_unknown']} stat rows for untracked players")
 
@@ -349,6 +359,7 @@ class DataOrchestrator:
 
                 for row in rows:
                     stats['processed'] += 1
+                    row = {**dict.fromkeys(self.GAME_CONTEXT_COLUMNS), **row}
 
                     try:
                         # Use savepoint to allow recovery from individual errors
