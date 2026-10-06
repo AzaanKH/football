@@ -1,8 +1,9 @@
 import axios from 'axios';
 
-// Override with REACT_APP_API_BASE (e.g. in .env.local) when the API isn't local
+// Override with VITE_API_BASE (e.g. in .env.local) when the API isn't local;
+// REACT_APP_API_BASE from the Create React App days still works
 const http = axios.create({
-  baseURL: process.env.REACT_APP_API_BASE || 'http://localhost:5001',
+  baseURL: import.meta.env.VITE_API_BASE || import.meta.env.REACT_APP_API_BASE || 'http://localhost:5001',
 });
 
 /** True when a request was cancelled via its AbortSignal (not a real failure). */

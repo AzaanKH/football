@@ -1,11 +1,8 @@
-// jest-dom adds custom jest matchers for asserting on DOM nodes.
-// allows you to do things like:
-// expect(element).toHaveTextContent(/react/i)
-// learn more: https://github.com/testing-library/jest-dom
-import '@testing-library/jest-dom';
+// Vitest setup: DOM matchers (toBeInTheDocument, toHaveTextContent, ...)
+import '@testing-library/jest-dom/vitest';
 
 // jsdom lacks a few browser APIs used by cmdk / Radix popovers and selects
-global.ResizeObserver = class {
+globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
   disconnect() {}

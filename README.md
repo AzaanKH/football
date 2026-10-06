@@ -125,14 +125,16 @@ python app.py
 ```bash
 cd frontend/fantasy-football
 npm install
-npm start
+npm start          # Vite dev server on http://localhost:3000
 ```
 
 The frontend calls `http://localhost:5001` by default. To point it elsewhere,
-set `REACT_APP_API_BASE` (e.g. in `frontend/fantasy-football/.env.local`).
-The season and weeks shown come from the data the backend has.
+set `VITE_API_BASE` (e.g. in `frontend/fantasy-football/.env.local`;
+`REACT_APP_API_BASE` still works). The season and weeks shown come from the
+data the backend has.
 
-Frontend tests: `CI=true npm test`.
+Frontend tests: `npm test` (Vitest). Production build: `npm run build`
+(output in `build/`), preview it with `npm run preview`.
 
 ### 7. Open the app
 
@@ -378,10 +380,11 @@ football/
 
 ### Frontend
 
-- React 18
-- Tailwind CSS
-- shadcn/ui
+- React 18 + Vite
+- Tailwind CSS 3
+- shadcn/ui (Radix, cmdk)
 - Axios
+- Vitest + Testing Library
 
 ## License
 
