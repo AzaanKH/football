@@ -77,7 +77,7 @@ function Freshness({ result }) {
     lines.push(`Injury status is shown only for the current week (${currentWeek.season} week ${currentWeek.week}).`);
   }
   return (
-    <p className="mt-8 max-w-prose text-sm leading-relaxed text-chalk-muted">
+    <p className="mt-8 max-w-prose text-pretty text-sm leading-relaxed text-chalk-muted">
       {lines.join(' ')} All points are PPR.
     </p>
   );
@@ -380,10 +380,10 @@ const App = () => {
               <p className="font-condensed text-lg text-chalk-secondary">
                 Week {resultWeek}, {result.request.season}
               </p>
-              <h2 id="results-title" className="mb-1 font-condensed text-4xl font-bold leading-tight sm:text-5xl">
+              <h2 id="results-title" className="mb-1 font-condensed text-verdict font-bold leading-tight text-balance">
                 {call ? call.title : 'No players could be projected'}
               </h2>
-              {call && <p className="mb-8 text-chalk-secondary">{call.detail}</p>}
+              {call && <p className="mb-8 text-pretty text-chalk-secondary">{call.detail}</p>}
 
               {predictions.length > 0 && (
                 <RangeField
@@ -413,10 +413,10 @@ const App = () => {
             </div>
           ) : (
             <div className="max-w-md">
-              <h2 id="results-title" className="mb-2 font-condensed text-4xl font-bold leading-tight">
+              <h2 id="results-title" className="mb-2 font-condensed text-4xl font-bold leading-tight text-balance">
                 {isLoadingPredictions ? `Comparing week ${week}...` : 'Who should you start?'}
               </h2>
-              <p className="text-chalk-secondary">
+              <p className="text-pretty text-chalk-secondary">
                 Pick the players you're deciding between, then compare them. You'll see each
                 one's projected PPR points and the range they usually land in.
               </p>

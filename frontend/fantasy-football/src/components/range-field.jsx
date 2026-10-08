@@ -108,7 +108,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
   for (let value = 0; value <= max; value += 10) ticks.push(value);
 
   return (
-    <section aria-labelledby="range-field-title">
+    <section aria-labelledby="range-field-title" className="@container">
       <div className="mb-3 flex items-baseline justify-between gap-4">
         <h3 id="range-field-title" className="text-sm text-chalk-secondary">
           Projected PPR points, with the range they land in 8 times out of 10
@@ -116,7 +116,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
         <button
           type="button"
           onClick={() => setAsTable((v) => !v)}
-          className="shrink-0 text-sm text-chalk underline decoration-yardline underline-offset-4 hover:decoration-chalk"
+          className="hit-area shrink-0 text-sm text-chalk underline decoration-yardline underline-offset-4 hover:decoration-chalk"
         >
           {asTable ? 'Show as chart' : 'Show as table'}
         </button>
@@ -160,8 +160,8 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
         <div key={animationKey}>
           {/* Yard markers */}
           {/* Same columns and padding as the rows below, so markers align with bands */}
-          <div aria-hidden="true" className="grid grid-cols-[1fr_3.5rem] gap-x-4 px-2 sm:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem]">
-            <span className="hidden sm:block" />
+          <div aria-hidden="true" className="grid grid-cols-[1fr_3.5rem] gap-x-4 px-2 @lg:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem]">
+            <span className="hidden @lg:block" />
             <div className="relative h-6 font-condensed text-sm font-semibold text-chalk-muted">
               {ticks.map((value) => (
                 <span
@@ -173,7 +173,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
                 </span>
               ))}
             </div>
-            <span className="hidden sm:block" />
+            <span className="hidden @lg:block" />
           </div>
 
           <ol className="space-y-1">
@@ -184,16 +184,18 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
                   key={p.playerId}
                   tabIndex={0}
                   aria-label={rowDescription(p)}
-                  onPointerEnter={() => setActive(p.playerId)}
-                  onPointerLeave={() => setActive(null)}
+                  // Hover is mouse-only: on touch, enter and leave both fire around a tap
+                  onPointerEnter={(e) => e.pointerType === 'mouse' && setActive(p.playerId)}
+                  onPointerLeave={(e) => e.pointerType === 'mouse' && setActive(null)}
+                  onClick={() => setActive(p.playerId)}
                   onFocus={() => setActive(p.playerId)}
                   onBlur={() => setActive(null)}
                   className={cn(
-                    'grid grid-cols-[1fr_3.5rem] gap-x-4 gap-y-2 rounded-md px-2 py-3 outline-hidden sm:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem] sm:items-center',
+                    'grid grid-cols-[1fr_3.5rem] gap-x-4 gap-y-2 rounded-md px-2 py-3 @lg:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem] @lg:items-center',
                     isActive && 'bg-sideline/70'
                   )}
                 >
-                  <div className="col-span-2 sm:col-span-1">
+                  <div className="col-span-2 @lg:col-span-1">
                     <PlayerLine p={p} showInjury={showInjuries} />
                   </div>
 
@@ -205,7 +207,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
                       style={{ left: pct(p.confidenceLow), width: `calc(${pct(p.confidenceHigh)} - ${pct(p.confidenceLow)})` }}
                     />
                     <span
-                      className="marker-in absolute top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-scrimmage shadow-[0_0_0_2px_#173A2A]"
+                      className="marker-in absolute top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-scrimmage shadow-[0_0_0_2px_var(--color-turf)]"
                       style={{ left: pct(p.predictedPoints) }}
                     />
                     {isActive && (

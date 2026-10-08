@@ -94,16 +94,21 @@ export function PlayerCombobox({
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[min(350px,calc(100vw-2rem))] border-yardline bg-popover p-0" align="start">
+      {/* Never taller than the space Radix measures below/above the trigger, so the
+          list stays reachable when a phone keyboard shrinks the viewport */}
+      <PopoverContent
+        className="flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-[min(350px,calc(100vw-2rem))] flex-col border-yardline bg-popover p-0"
+        align="start"
+      >
         {/* Filtering happens on the server; cmdk only handles keyboard navigation */}
-        <Command className="bg-transparent" shouldFilter={false}>
+        <Command className="min-h-0 bg-transparent" shouldFilter={false}>
           <CommandInput
             value={query}
             onValueChange={setQuery}
             placeholder="Search by name or team..."
             className="text-chalk placeholder:text-chalk-muted"
           />
-          <CommandList className="max-h-[300px]">
+          <CommandList className="max-h-none min-h-0">
             {status === "idle" && (
               <CommandEmpty className="py-6 text-center text-sm text-chalk-secondary">
                 No player found.

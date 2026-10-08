@@ -191,6 +191,14 @@ defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
   orange is only the primary button; flag yellow / out red are injury status
   only, always with an icon and label. Use the `frontend-design` skill for UI
   work.
+- The palette is defined once (hex, in `@theme`); shadcn semantic tokens
+  (`--color-card`, `--color-ring`, ...) point at it, and in-between shades
+  are `color-mix(in oklch, ...)`. Don't add HSL copies or hard-coded hex.
+- Touch targets: add the `hit-area` utility (index.css) to compact controls;
+  it grows the clickable area to 44px without changing the visual. Movement
+  (zoom/slide/scale) goes behind `motion-safe:`; fades may stay unconditional.
+- The range chart lays out from its own width (`@container` + `@lg:`), not
+  viewport breakpoints.
 - cmdk v1 always renders `data-disabled="false"`: style disabled items with
   `data-[disabled=true]:`, not `data-[disabled]:`.
 - Tests use Vitest (config in `vite.config.mjs`: jsdom, `pool: 'threads'`
