@@ -157,9 +157,8 @@ class WeeklyPredictor:
         'fantasy_pts_trend_3',
         'usage_trend_3',
 
-        # Matchup - opponent
-        'opp_position_rank',
-        'opp_fantasy_pts_allowed',
+        # Matchup (opponent defense is stored but not a model input: it
+        # made the QB correction worse in evaluation.py)
         'is_home',
         'days_rest',
 
@@ -177,7 +176,7 @@ class WeeklyPredictor:
         'yards_per_pass_attempt', 'td_per_pass_attempt',
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
-        'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
+        'is_home', 'days_rest',
         SLEEPER_FEATURE,
     ]
 
@@ -191,7 +190,7 @@ class WeeklyPredictor:
         'yards_per_carry', 'yards_per_target', 'td_per_touch', 'catch_rate',
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
-        'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
+        'is_home', 'days_rest',
         SLEEPER_FEATURE,
     ]
 
@@ -204,7 +203,7 @@ class WeeklyPredictor:
         'yards_per_target', 'yards_per_reception', 'td_per_touch', 'catch_rate',
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
-        'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
+        'is_home', 'days_rest',
         SLEEPER_FEATURE,
     ]
 

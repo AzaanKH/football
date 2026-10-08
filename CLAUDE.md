@@ -227,7 +227,9 @@ defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
 - Opponent-defense rank and snap share are computed and stored but not used
   by the model: tested in `evaluation.py` (2025 W7 - 2026 W3) they did not
   beat Sleeper's projection for any position (Sleeper already prices in
-  matchup and role), and for QB they made the correction worse.
+  matchup and role). Opponent defense was a model input while it was always
+  empty; once populated it made the QB correction worse (MAE 5.85 -> 6.08),
+  so it was taken out of the feature lists.
 - For upcoming weeks, the opponent/bye comes from the player's *current*
   team (`players.team`); finished weeks use the team they actually played for.
 - Injury status is current-only; the UI shows it only for the current week.
