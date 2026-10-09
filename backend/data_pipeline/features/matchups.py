@@ -172,6 +172,7 @@ class MatchupFeatures:
             SELECT week
             FROM player_weekly_stats
             WHERE player_id = %s
+              AND played
               AND season = %s
               AND week < %s
             ORDER BY week DESC

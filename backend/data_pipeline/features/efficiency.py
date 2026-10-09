@@ -120,6 +120,7 @@ class EfficiencyMetrics:
                 COUNT(*) as games_played
             FROM player_weekly_stats
             WHERE player_id = %s
+              AND played
               AND season = %s
               AND week < %s
         """
@@ -152,6 +153,7 @@ class EfficiencyMetrics:
                 SELECT *
                 FROM player_weekly_stats
                 WHERE player_id = %s
+                  AND played
                   AND ((season = %s AND week < %s) OR season < %s)
                 ORDER BY season DESC, week DESC
                 LIMIT 10

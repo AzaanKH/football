@@ -235,6 +235,7 @@ class FeatureEngineer:
                 SELECT 1
                 FROM player_weekly_stats pws
                 WHERE pws.player_id = p.player_id
+                  AND pws.played
                   AND ((pws.season = %s AND pws.week < %s) OR pws.season < %s)
             )
         """

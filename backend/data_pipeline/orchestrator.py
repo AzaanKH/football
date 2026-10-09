@@ -247,6 +247,13 @@ class DataOrchestrator:
         'fumbles', 'fumbles_lost', 'source',
     ]
 
+    @staticmethod
+    def _known_player_ids(conn) -> set:
+        """IDs of players tracked in the players table."""
+        cursor = conn.cursor()
+        cursor.execute("SELECT player_id FROM players")
+        return {row[0] for row in cursor.fetchall()}
+
     def _scraped_weekly_rows(self, conn, season: int, week: int,
                              stats: Dict[str, int]) -> List[Dict]:
         """
@@ -296,18 +303,27 @@ class DataOrchestrator:
             Dictionary with sync statistics
         """
         logger.info(f"Starting stats sync for {season} week {week}...")
-        stats = {'processed': 0, 'inserted': 0, 'updated': 0, 'errors': 0, 'unmatched': 0}
+        stats = {'processed': 0, 'inserted': 0, 'updated': 0, 'errors': 0,
+                 'unmatched': 0, 'skipped_unknown': 0}
 
         with self.get_db_connection() as conn:
             log_id = self._log_ingestion(conn, 'sleeper', 'stats', season, week)
 
             try:
                 # Each source is normalized by its own transformer into schema rows
-                weekly_stats = self.sleeper.get_weekly_stats(season, week)
+                weekly_stats = self.sleeper.get_weekly_stats(season, week) or {}
+
+                # Sleeper returns stats for every player (team defenses, IDP, ...);
+                # keep only players we track. Run sync_players first for new players.
+                known_ids = self._known_player_ids(conn)
+                stats['skipped_unknown'] = sum(1 for pid in weekly_stats if pid not in known_ids)
                 rows = [
                     transform_weekly_stats(player_id, player_stats, season, week)
-                    for player_id, player_stats in (weekly_stats or {}).items()
+                    for player_id, player_stats in weekly_stats.items()
+                    if player_id in known_ids
                 ]
+                if stats['skipped_unknown']:
+                    logger.info(f"Skipped {stats['skipped_unknown']} stat rows for untracked players")
 
                 if not rows and use_fallback:
                     logger.warning("Sleeper API failed, trying scraper fallback...")

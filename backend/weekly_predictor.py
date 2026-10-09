@@ -238,6 +238,8 @@ class WeeklyPredictor:
                 ON pf.player_id = p.player_id
             WHERE p.position = %s
                 AND pws.fantasy_points_ppr IS NOT NULL
+                -- Target is points *if the player plays*; inactive weeks aren't outcomes
+                AND pws.played
             ORDER BY pf.season, pf.week
         """
 

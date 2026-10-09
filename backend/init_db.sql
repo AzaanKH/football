@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS player_weekly_stats (
     source VARCHAR(20) DEFAULT 'sleeper',  -- 'sleeper', 'espn', 'scraped', 'manual'
     created_at TIMESTAMP DEFAULT NOW(),
 
+    -- Sleeper also returns rows for inactive/benched players (0 pts, 0 opportunities).
+    -- Rows with an opportunity or any fantasy points count as games played.
+    played BOOLEAN GENERATED ALWAYS AS (
+        COALESCE(passing_attempts, 0) + COALESCE(rushing_attempts, 0)
+        + COALESCE(targets, 0) + COALESCE(receptions, 0) > 0
+        OR COALESCE(fantasy_points_ppr, 0) <> 0
+    ) STORED,
+
     CONSTRAINT unique_player_week UNIQUE (player_id, season, week)
 );
 
@@ -82,6 +90,9 @@ CREATE TABLE IF NOT EXISTS player_weekly_stats (
 CREATE INDEX IF NOT EXISTS idx_stats_player ON player_weekly_stats(player_id);
 CREATE INDEX IF NOT EXISTS idx_stats_season_week ON player_weekly_stats(season, week);
 CREATE INDEX IF NOT EXISTS idx_stats_player_season ON player_weekly_stats(player_id, season);
+CREATE INDEX IF NOT EXISTS idx_stats_player_played
+    ON player_weekly_stats(player_id, season DESC, week DESC)
+    WHERE played;
 
 -- Team defense stats table
 CREATE TABLE IF NOT EXISTS team_defense_stats (
