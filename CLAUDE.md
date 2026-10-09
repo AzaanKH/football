@@ -118,9 +118,12 @@ Dependencies are pinned in `backend/requirements*.txt`
 ### Season calendar
 
 `data_pipeline/season.py` is the single source of truth: Sleeper's
-`/state/nfl`, else a date estimate (season opens the Thursday after Labor
-Day). A week is *finished* once its last kickoff (from the synced schedule)
-plus 4 hours has passed. Never hard-code a season; use `current_context()`.
+`/state/nfl`; else the synced schedule (current week = first week whose
+games haven't all finished); else a date estimate (season opens the
+Thursday after Labor Day; January belongs to the previous season, whose
+weeks 17-18 are played then). A week is *finished* once its last kickoff
+(from the synced schedule) plus 4 hours has passed. Never hard-code a
+season; use `current_context()`.
 
 ### Database
 
@@ -211,7 +214,8 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
 - Opponent-defense features are empty (`team_defense_stats` unpopulated);
   snap counts are not stored. Both are candidate features to test.
 - Player team for opponent/bye is the *current* team (`players.team`), so
-  traded players can show the wrong matchup for past weeks.
+  traded players can show the wrong matchup for past weeks (a player who
+  played that week is never marked on bye; no opponent is shown instead).
 - Injury status is current-only; the UI shows it only for the current week.
 - QB range coverage is ~76% vs the 80% target (calibration drift).
 - `npm audit` reports 5 high findings, all from Tailwind 3's build-time

@@ -325,6 +325,16 @@ def job_listener(event):
         logger.info(f"Job {event.job_id} completed successfully")
 
 
+# NFL timezone. Each CronTrigger needs it explicitly: a trigger constructed
+# outside add_job() uses the host's local zone, not the scheduler's.
+SCHEDULER_TIMEZONE = 'America/New_York'
+
+
+def _cron(**fields):
+    """CronTrigger evaluated in Eastern time, whatever the host's zone."""
+    return CronTrigger(timezone=SCHEDULER_TIMEZONE, **fields)
+
+
 class FantasyScheduler:
     """Fantasy Football Data Scheduler."""
 
@@ -332,9 +342,7 @@ class FantasyScheduler:
         if not SCHEDULER_AVAILABLE:
             raise ImportError("APScheduler not installed. Run: pip install apscheduler")
 
-        self.scheduler = BackgroundScheduler(
-            timezone='America/New_York'  # NFL timezone
-        )
+        self.scheduler = BackgroundScheduler(timezone=SCHEDULER_TIMEZONE)
         self.scheduler.add_listener(job_listener, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
         self._setup_jobs()
 
@@ -344,7 +352,7 @@ class FantasyScheduler:
         # Daily player sync at 6:00 AM ET
         self.scheduler.add_job(
             job_sync_players,
-            CronTrigger(hour=6, minute=0),
+            _cron(hour=6, minute=0),
             id='sync_players',
             name='Daily Player Sync',
             replace_existing=True,
@@ -354,7 +362,7 @@ class FantasyScheduler:
         # Tuesday stats sync at 6:00 AM ET (after Monday Night Football)
         self.scheduler.add_job(
             job_sync_weekly_stats,
-            CronTrigger(day_of_week='tue', hour=6, minute=0),
+            _cron(day_of_week='tue', hour=6, minute=0),
             id='sync_stats',
             name='Weekly Stats Sync',
             replace_existing=True,
@@ -364,7 +372,7 @@ class FantasyScheduler:
         # Tuesday matchup/projection sync at 6:30 AM ET
         self.scheduler.add_job(
             job_sync_prediction_context,
-            CronTrigger(day_of_week='tue', hour=6, minute=30),
+            _cron(day_of_week='tue', hour=6, minute=30),
             id='sync_prediction_context',
             name='Weekly Prediction Context Sync',
             replace_existing=True,
@@ -374,7 +382,7 @@ class FantasyScheduler:
         # Daily projection refresh at 10:00 AM ET (injury/depth-chart news)
         self.scheduler.add_job(
             job_refresh_projections,
-            CronTrigger(hour=10, minute=0),
+            _cron(hour=10, minute=0),
             id='refresh_projections',
             name='Daily Projection Refresh',
             replace_existing=True,
@@ -384,7 +392,7 @@ class FantasyScheduler:
         # Sunday 11:45 AM ET: after inactives are announced, before 1 PM kickoffs
         self.scheduler.add_job(
             job_refresh_projections,
-            CronTrigger(day_of_week='sun', hour=11, minute=45),
+            _cron(day_of_week='sun', hour=11, minute=45),
             id='refresh_projections_gameday',
             name='Gameday Projection Refresh',
             replace_existing=True,
@@ -394,7 +402,7 @@ class FantasyScheduler:
         # Tuesday feature computation at 7:00 AM ET
         self.scheduler.add_job(
             job_compute_features,
-            CronTrigger(day_of_week='tue', hour=7, minute=0),
+            _cron(day_of_week='tue', hour=7, minute=0),
             id='compute_features',
             name='Weekly Feature Computation',
             replace_existing=True,
@@ -404,7 +412,7 @@ class FantasyScheduler:
         # Tuesday model retraining at 8:00 AM ET
         self.scheduler.add_job(
             job_retrain_model,
-            CronTrigger(day_of_week='tue', hour=8, minute=0),
+            _cron(day_of_week='tue', hour=8, minute=0),
             id='retrain_model',
             name='Weekly Model Retraining',
             replace_existing=True,

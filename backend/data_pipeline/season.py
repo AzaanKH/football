@@ -5,9 +5,11 @@ Single source of truth for "where are we in the NFL season", so data
 collection, scheduling and the API follow the real calendar instead of a
 hard-coded season.
 
-Sleeper's /state/nfl is authoritative. If it can't be reached, the season is
-estimated from the date (the regular season opens the Thursday after Labor
-Day; weeks run Thursday through Monday).
+Sleeper's /state/nfl is authoritative. If it can't be reached, the current
+week is the first one whose games haven't all finished on the synced
+schedule; without a synced schedule, it is estimated from the date (the
+regular season opens the Thursday after Labor Day; weeks run Thursday
+through Monday, and the last ones fall in January).
 
 A regular-season week counts as completed only after its last game has
 finished: with the week's schedule synced, that is the last kickoff plus
@@ -66,17 +68,34 @@ def season_opener(year: int) -> date:
 
 def estimate_state(today: date) -> Dict:
     """Sleeper-shaped NFL state estimated from the calendar alone."""
-    opener = season_opener(today.year)
-    if today >= opener:
-        week = (today - opener).days // 7 + 1
-        if week <= REGULAR_SEASON_WEEKS:
-            return {'season': today.year, 'week': week, 'season_type': 'regular'}
-        return {'season': today.year, 'week': REGULAR_SEASON_WEEKS, 'season_type': 'post'}
-    if today.month <= 2:
-        # January/February: last season's playoffs
-        return {'season': today.year - 1, 'week': REGULAR_SEASON_WEEKS, 'season_type': 'post'}
-    # March to the opener: the upcoming season hasn't started
-    return {'season': today.year, 'week': 0, 'season_type': 'off'}
+    # January/February belong to the season that opened the previous September
+    # (its last regular-season weeks, then the playoffs)
+    season = today.year if today.month >= 3 else today.year - 1
+    opener = season_opener(season)
+    if today < opener:
+        # March to the opener: the upcoming season hasn't started
+        return {'season': season, 'week': 0, 'season_type': 'off'}
+    week = (today - opener).days // 7 + 1
+    if week <= REGULAR_SEASON_WEEKS:
+        return {'season': season, 'week': week, 'season_type': 'regular'}
+    return {'season': season, 'week': REGULAR_SEASON_WEEKS, 'season_type': 'post'}
+
+
+def schedule_state(season: int, now: datetime,
+                   week_end_lookup: Callable[[int, int], Optional[datetime]]) -> Optional[Dict]:
+    """
+    NFL state from the synced schedule: the current week is the first one whose
+    last game hasn't finished. Follows the real dates (a Wednesday opener,
+    games moved for weather or international slots) where the date estimate
+    can't. None when any week of the season is missing from the schedule.
+    """
+    for week in range(1, REGULAR_SEASON_WEEKS + 1):
+        end = week_end_lookup(season, week)
+        if end is None:
+            return None
+        if now < end + GAME_DURATION:
+            return {'season': season, 'week': week, 'season_type': 'regular'}
+    return {'season': season, 'week': REGULAR_SEASON_WEEKS, 'season_type': 'post'}
 
 
 def fetch_sleeper_state() -> Optional[Dict]:
@@ -135,7 +154,8 @@ def current_context(
 
     Args:
         week_end_lookup: (season, week) -> last kickoff (UTC), from the synced
-            schedule; makes the current week count as complete once played
+            schedule; makes the current week count as complete once played,
+            and places the current week when Sleeper is unreachable
         now: Override the clock (tests)
         state: Override the NFL state (tests); otherwise Sleeper, then calendar
     """
@@ -145,6 +165,14 @@ def current_context(
         state = fetch_sleeper_state()
     if not state or 'season' not in state:
         state, source = estimate_state(now.date()), 'calendar'
+        # Months before the opener, the synced schedule would already say
+        # "week 1"; trust it only from the week before the estimated opener
+        near_season = now.date() >= season_opener(int(state['season'])) - timedelta(days=7)
+        if week_end_lookup and near_season:
+            try:
+                state = schedule_state(int(state['season']), now, week_end_lookup) or state
+            except Exception as e:
+                logger.warning(f"Could not read the schedule to place the current week: {e}")
 
     week_end = None
     if week_end_lookup and state.get('season_type') == 'regular' and int(state.get('week') or 0) >= 1:
