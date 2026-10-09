@@ -15,6 +15,7 @@ Training paradigm: Features from Week N → Actual points in Week N
 
 import pandas as pd
 import numpy as np
+import copy
 import pickle
 import os
 import logging
@@ -678,10 +679,23 @@ class WeeklyPredictor:
 
         os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
 
-        with open(filepath, 'wb') as f:
+        # Write then atomically swap, so a running API that reloads on file
+        # change never reads a half-written pickle
+        tmp_path = f"{filepath}.tmp"
+        with open(tmp_path, 'wb') as f:
             pickle.dump(model_data, f)
+        os.replace(tmp_path, filepath)
 
         logger.info(f"Weekly predictor saved to {filepath}")
+
+    def with_connection(self, db_connection) -> 'WeeklyPredictor':
+        """
+        Shallow copy sharing the (read-only) trained models but using its own
+        database connection, so concurrent requests never share a connection.
+        """
+        view = copy.copy(self)
+        view.db_connection = db_connection
+        return view
 
     @classmethod
     def load(cls, filepath: str, db_connection=None) -> 'WeeklyPredictor':

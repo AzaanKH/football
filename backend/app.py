@@ -1,86 +1,240 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from contextlib import contextmanager
 import os
 import logging
+import threading
+
+import psycopg2
+from psycopg2 import pool as pg_pool
+
+from model_store import ModelStore
+from weekly_predictor import WeeklyPredictor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# PostgreSQL connection for new prediction system
-POSTGRES_AVAILABLE = False
-pg_connection = None
+MODEL_PATH = os.environ.get('MODEL_PATH', 'models/weekly_predictor.pkl')
+DEFAULT_SEASON = int(os.environ.get('DEFAULT_SEASON', 2025))
 
-try:
-    import psycopg2
+# Positions the API accepts (TE is listed; predictions explain it has no model)
+POSITIONS = {'qb', 'rb', 'wr', 'te'}
+MAX_PLAYERS_PER_REQUEST = 50
 
-    def get_pg_connection():
-        return psycopg2.connect(
-            host=os.environ.get('DB_HOST', 'localhost'),
-            port=os.environ.get('DB_PORT', 5432),
-            database=os.environ.get('DB_NAME', 'football_dev'),
-            user=os.environ.get('DB_USER', 'postgres'),
-            password=os.environ.get('DB_PASSWORD', 'postgres')
-        )
-
-    # Test connection
-    test_conn = get_pg_connection()
-    test_conn.close()
-    POSTGRES_AVAILABLE = True
-    logger.info("PostgreSQL connection available")
-except Exception as e:
-    logger.warning(f"PostgreSQL not available: {e}")
-    logger.warning("Weekly predictions require PostgreSQL. Start with: docker-compose up -d")
-
-# Weekly predictor (Phase 4)
-WEEKLY_PREDICTOR_AVAILABLE = False
-weekly_predictor = None
-
-try:
-    from weekly_predictor import WeeklyPredictor
-
-    model_path = 'models/weekly_predictor.pkl'
-    if os.path.exists(model_path) and POSTGRES_AVAILABLE:
-        weekly_predictor = WeeklyPredictor.load(model_path, db_connection=get_pg_connection())
-        WEEKLY_PREDICTOR_AVAILABLE = True
-        logger.info("Weekly predictor loaded successfully")
-    else:
-        logger.info("Weekly predictor model not found. Train with: python weekly_predictor.py train")
-except ImportError as e:
-    logger.warning(f"Weekly predictor not available: {e}")
-except Exception as e:
-    logger.warning(f"Failed to load weekly predictor: {e}")
+DB_HELP = 'Start the database with: docker-compose up -d'
 
 app = Flask(__name__)
 CORS(app)
 
+# The model reloads itself whenever the pickle changes (e.g. scheduled retrain)
+model_store = ModelStore(MODEL_PATH, loader=WeeklyPredictor.load)
+
+
+# ============================================================================
+# Database connections: one pooled connection per request, always returned
+# ============================================================================
+
+DB_POOL_MAX = int(os.environ.get('DB_POOL_MAX', 10))
+DB_POOL_WAIT_SECONDS = float(os.environ.get('DB_POOL_WAIT_SECONDS', 10))
+
+_pool = None
+_pool_lock = threading.Lock()
+# ThreadedConnectionPool raises immediately when every connection is in use;
+# this makes requests queue for a free connection instead of failing a burst.
+_pool_slots = threading.BoundedSemaphore(DB_POOL_MAX)
+
+
+class PoolBusy(Exception):
+    """No connection freed up within DB_POOL_WAIT_SECONDS."""
+
+
+def _get_pool():
+    """Create the connection pool on first use; retried until the DB is up."""
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                _pool = pg_pool.ThreadedConnectionPool(
+                    minconn=1,
+                    maxconn=DB_POOL_MAX,
+                    host=os.environ.get('DB_HOST', 'localhost'),
+                    port=os.environ.get('DB_PORT', 5432),
+                    database=os.environ.get('DB_NAME', 'football_dev'),
+                    user=os.environ.get('DB_USER', 'postgres'),
+                    password=os.environ.get('DB_PASSWORD', 'postgres'),
+                    connect_timeout=5,
+                )
+    return _pool
+
+
+@contextmanager
+def db_connection():
+    """
+    Borrow a connection for the duration of a request.
+
+    The transaction is rolled back (all API queries are reads) before the
+    connection goes back to the pool; broken connections are discarded.
+    """
+    pool = _get_pool()
+    if not _pool_slots.acquire(timeout=DB_POOL_WAIT_SECONDS):
+        raise PoolBusy()
+    try:
+        conn = pool.getconn()
+    except BaseException:
+        _pool_slots.release()
+        raise
+
+    discard = False
+    try:
+        yield conn
+    finally:
+        try:
+            if conn.closed:
+                discard = True
+            else:
+                conn.rollback()
+        except psycopg2.Error:
+            discard = True
+        pool.putconn(conn, close=discard)
+        _pool_slots.release()
+
+
+# ============================================================================
+# Input validation: invalid input is a 400, never a 500
+# ============================================================================
+
+class BadRequest(ValueError):
+    """Client input error, returned as HTTP 400."""
+
+
+def _int_param(value, name: str, minimum: int, maximum: int, default=None) -> int:
+    if value is None or value == '':
+        if default is None:
+            raise BadRequest(f'{name} is required')
+        return default
+    if isinstance(value, bool):
+        raise BadRequest(f'{name} must be an integer')
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise BadRequest(f'{name} must be an integer')
+    if isinstance(value, float) and value != number:
+        raise BadRequest(f'{name} must be an integer')
+    if not minimum <= number <= maximum:
+        raise BadRequest(f'{name} must be between {minimum} and {maximum}')
+    return number
+
+
+def _season_param(value) -> int:
+    return _int_param(value, 'season', 1999, 2100, default=DEFAULT_SEASON)
+
+
+def _position_param(value, required: bool) -> str:
+    if value is None or value == '':
+        if required:
+            raise BadRequest('position is required')
+        return ''
+    if not isinstance(value, str) or value.lower() not in POSITIONS:
+        raise BadRequest(f"position must be one of: {', '.join(sorted(POSITIONS))}")
+    return value.lower()
+
+
+def _player_ids_param(value) -> list:
+    if not isinstance(value, list) or not value:
+        raise BadRequest('player_ids must be a non-empty list')
+    if len(value) > MAX_PLAYERS_PER_REQUEST:
+        raise BadRequest(f'player_ids accepts at most {MAX_PLAYERS_PER_REQUEST} players')
+    ids = []
+    for pid in value:
+        if isinstance(pid, bool) or not isinstance(pid, (str, int)) or not str(pid).strip():
+            raise BadRequest('player_ids must contain player ID strings')
+        if len(str(pid)) > 50:
+            raise BadRequest('player_ids contains an invalid ID')
+        ids.append(str(pid).strip())
+    return ids
+
+
+def _json_body() -> dict:
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise BadRequest('Request body must be a JSON object')
+    return body
+
+
+@app.errorhandler(BadRequest)
+def handle_bad_request(e):
+    return jsonify({'error': str(e)}), 400
+
+
+@app.errorhandler(psycopg2.OperationalError)
+@app.errorhandler(pg_pool.PoolError)
+def handle_db_unavailable(e):
+    logger.warning(f"Database unavailable: {e}")
+    return jsonify({'error': 'Database unavailable', 'help': DB_HELP}), 503
+
+
+@app.errorhandler(PoolBusy)
+def handle_pool_busy(e):
+    logger.warning("No database connection free within the wait timeout")
+    return jsonify({'error': 'Server busy, please retry'}), 503
+
+
+@app.errorhandler(Exception)
+def handle_unexpected(e):
+    # Let Flask render real HTTP errors (404, 405, ...) normally
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    logger.exception("Unhandled error")
+    return jsonify({'error': 'Internal server error'}), 500
+
+
+def _require_model():
+    predictor = model_store.get()
+    if predictor is None:
+        return None, (jsonify({
+            'error': 'Weekly predictor not available',
+            'help': 'Train with: python weekly_predictor.py train',
+            'last_load_error': model_store.last_error,
+        }), 503)
+    return predictor, None
+
+
+# ============================================================================
+# Endpoints
+# ============================================================================
 
 @app.route('/model_status', methods=['GET'])
 def model_status():
     """
-    Get status of available models.
+    Get status of the database and the weekly prediction model.
 
-    Returns:
-        Dictionary with model availability and metrics
+    Checked on every call, so it reflects the current state (not startup).
     """
+    try:
+        with db_connection() as conn:
+            conn.cursor().execute('SELECT 1')
+        postgres_available = True
+    except (psycopg2.Error, pg_pool.PoolError):
+        postgres_available = False
+
+    predictor = model_store.get()
     status = {
-        'weekly_predictor_available': WEEKLY_PREDICTOR_AVAILABLE,
-        'postgres_available': POSTGRES_AVAILABLE
+        'weekly_predictor_available': predictor is not None and postgres_available,
+        'postgres_available': postgres_available,
+        'model': model_store.status(),
+        'default_season': DEFAULT_SEASON,
     }
 
-    if WEEKLY_PREDICTOR_AVAILABLE and weekly_predictor:
+    if predictor is not None:
         status['weekly_predictor'] = {
-            'trained': weekly_predictor._is_trained,
-            'positions': list(weekly_predictor.models.keys()),
-            'metrics': weekly_predictor.training_metrics
+            'trained': predictor._is_trained,
+            'positions': list(predictor.models.keys()),
+            'metrics': predictor.training_metrics
         }
 
     return jsonify(status)
 
-
-# ============================================================================
-# NEW WEEKLY PREDICTION ENDPOINTS (Phase 4)
-# These use Phase 2 features for proper next-week predictions
-# ============================================================================
 
 @app.route('/players', methods=['GET'])
 def get_players_postgres():
@@ -88,154 +242,110 @@ def get_players_postgres():
     Get players from PostgreSQL database.
 
     Query params:
-        position: Filter by position (qb, rb, wr)
-        limit: Max results (default 100)
+        position: Filter by position (qb, rb, wr, te)
+        limit: Max results (1-500, default 100)
         search: Search by name
 
     Returns:
         List of players with id, name, team, position
     """
-    if not POSTGRES_AVAILABLE:
-        return jsonify({'error': 'PostgreSQL not available. Start with: docker-compose up -d'}), 503
+    position = _position_param(request.args.get('position'), required=False).upper()
+    limit = _int_param(request.args.get('limit'), 'limit', 1, 500, default=100)
+    search = request.args.get('search', '').strip()
+    if len(search) > 100:
+        raise BadRequest('search must be at most 100 characters')
 
-    position = request.args.get('position', '').upper()
-    limit = int(request.args.get('limit', 100))
-    search = request.args.get('search', '')
+    query = """
+        SELECT player_id, full_name, team, position
+        FROM players
+        WHERE position IN ('QB', 'RB', 'WR', 'TE')
+    """
+    params = []
 
-    try:
-        conn = get_pg_connection()
+    if position:
+        query += " AND position = %s"
+        params.append(position)
+
+    if search:
+        query += " AND full_name ILIKE %s"
+        params.append(f'%{search}%')
+
+    query += " ORDER BY full_name LIMIT %s"
+    params.append(limit)
+
+    with db_connection() as conn:
         cursor = conn.cursor()
-
-        query = """
-            SELECT player_id, full_name, team, position
-            FROM players
-            WHERE position IN ('QB', 'RB', 'WR', 'TE')
-        """
-        params = []
-
-        if position:
-            query += " AND position = %s"
-            params.append(position)
-
-        if search:
-            query += " AND full_name ILIKE %s"
-            params.append(f'%{search}%')
-
-        query += " ORDER BY full_name LIMIT %s"
-        params.append(limit)
-
         cursor.execute(query, params)
         columns = ['player_id', 'full_name', 'team', 'position']
         players = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        conn.close()
-        return jsonify(players)
-
-    except Exception as e:
-        logger.error(f"Error fetching players: {e}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify(players)
 
 
 @app.route('/predict_week', methods=['POST'])
 def predict_week():
     """
-    Predict fantasy points for upcoming week using Phase 2 features.
-
-    This is the NEW prediction system that properly predicts future performance
-    using rolling averages, efficiency metrics, trends, and matchup data.
+    Predict fantasy points for an upcoming week using engineered features.
 
     Request body:
-        position: 'qb', 'rb', or 'wr'
-        player_ids: List of player IDs to predict
-        week: Week number to predict FOR
-        season: NFL season (default: 2024)
+        position: 'qb', 'rb', 'wr' or 'te'
+        player_ids: List of player IDs to predict (max 50)
+        week: Week number to predict FOR (1-22)
+        season: NFL season (default: DEFAULT_SEASON)
 
     Returns:
-        {
-            week: 15,
-            season: 2024,
-            predictions: [
-                {
-                    player_id: "4034",
-                    player_name: "Saquon Barkley",
-                    predicted_points: 18.5,
-                    confidence_low: 12.3,
-                    confidence_high: 24.7,
-                    features: {
-                        avg_3_games: 16.2,
-                        trend: "improving",
-                        ...
-                    }
-                }
-            ]
-        }
+        {week, season, position,
+         predictions: [{player_id, player_name, predicted_points,
+                        confidence_low, confidence_high, features}],
+         unavailable: [{player_id, player_name, reason, message}]}
     """
-    if not WEEKLY_PREDICTOR_AVAILABLE:
-        return jsonify({
-            'error': 'Weekly predictor not available',
-            'help': 'Train with: python weekly_predictor.py train',
-            'requires': ['PostgreSQL running', 'Data synced', 'Features computed']
-        }), 503
+    body = _json_body()
+    position = _position_param(body.get('position'), required=True)
+    player_ids = _player_ids_param(body.get('player_ids'))
+    week = _int_param(body.get('week'), 'week', 1, 22)
+    season = _season_param(body.get('season'))
 
-    data = request.json
-    position = data.get('position')
-    player_ids = data.get('player_ids', [])
-    week = data.get('week')
-    season = data.get('season', 2024)
+    predictor, error = _require_model()
+    if error:
+        return error
 
-    if not position:
-        return jsonify({'error': 'position is required'}), 400
-    if not player_ids:
-        return jsonify({'error': 'player_ids is required'}), 400
-    if not week:
-        return jsonify({'error': 'week is required'}), 400
-
-    try:
-        # Get fresh DB connection for this request
-        conn = get_pg_connection()
-        weekly_predictor.db_connection = conn
-
-        predictions = weekly_predictor.predict_week(
+    with db_connection() as conn:
+        # Request-scoped view: shares the models, never the connection
+        predictions = predictor.with_connection(conn).predict_week(
             player_ids=player_ids,
             season=season,
             week=week,
             position=position
         )
 
-        conn.close()
+    # Every requested player appears in exactly one list
+    results = []
+    unavailable = []
+    for pred in predictions:
+        if pred.status == 'ok':
+            results.append({
+                'player_id': pred.player_id,
+                'player_name': pred.player_name,
+                'predicted_points': pred.predicted_points,
+                'confidence_low': pred.confidence_low,
+                'confidence_high': pred.confidence_high,
+                'features': pred.features_used
+            })
+        else:
+            unavailable.append({
+                'player_id': pred.player_id,
+                'player_name': pred.player_name,
+                'reason': pred.reason,
+                'message': pred.message,
+            })
 
-        # Every requested player appears in exactly one list
-        results = []
-        unavailable = []
-        for pred in predictions:
-            if pred.status == 'ok':
-                results.append({
-                    'player_id': pred.player_id,
-                    'player_name': pred.player_name,
-                    'predicted_points': pred.predicted_points,
-                    'confidence_low': pred.confidence_low,
-                    'confidence_high': pred.confidence_high,
-                    'features': pred.features_used
-                })
-            else:
-                unavailable.append({
-                    'player_id': pred.player_id,
-                    'player_name': pred.player_name,
-                    'reason': pred.reason,
-                    'message': pred.message,
-                })
-
-        return jsonify({
-            'week': week,
-            'season': season,
-            'position': position,
-            'predictions': results,
-            'unavailable': unavailable
-        })
-
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify({
+        'week': week,
+        'season': season,
+        'position': position,
+        'predictions': results,
+        'unavailable': unavailable
+    })
 
 
 @app.route('/available_weeks', methods=['GET'])
@@ -244,36 +354,25 @@ def available_weeks():
     Get weeks that have computed features available for predictions.
 
     Query params:
-        season: NFL season (default: 2024)
+        season: NFL season (default: DEFAULT_SEASON)
 
     Returns:
         List of weeks with feature data
     """
-    if not POSTGRES_AVAILABLE:
-        return jsonify({'error': 'PostgreSQL not available'}), 503
+    season = _season_param(request.args.get('season'))
 
-    season = int(request.args.get('season', 2024))
-
-    try:
-        conn = get_pg_connection()
+    with db_connection() as conn:
         cursor = conn.cursor()
-
         cursor.execute("""
-            SELECT DISTINCT week, COUNT(*) as player_count
+            SELECT week, COUNT(*) as player_count
             FROM player_features
             WHERE season = %s
             GROUP BY week
             ORDER BY week
         """, (season,))
-
         weeks = [{'week': row[0], 'players': row[1]} for row in cursor.fetchall()]
 
-        conn.close()
-        return jsonify({'season': season, 'weeks': weeks})
-
-    except Exception as e:
-        logger.error(f"Error fetching weeks: {e}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify({'season': season, 'weeks': weeks})
 
 
 @app.route('/player_features/<player_id>', methods=['GET'])
@@ -282,29 +381,25 @@ def get_player_features(player_id):
     Get computed features for a specific player.
 
     Query params:
-        season: NFL season (default: 2024)
+        season: NFL season (default: DEFAULT_SEASON)
         week: Specific week (optional, returns latest if not specified)
 
     Returns:
         Player features used for prediction
     """
-    if not POSTGRES_AVAILABLE:
-        return jsonify({'error': 'PostgreSQL not available'}), 503
+    season = _season_param(request.args.get('season'))
+    week_arg = request.args.get('week')
+    week = _int_param(week_arg, 'week', 1, 22) if week_arg else None
 
-    season = int(request.args.get('season', 2024))
-    week = request.args.get('week')
-
-    try:
-        conn = get_pg_connection()
+    with db_connection() as conn:
         cursor = conn.cursor()
-
         if week:
             cursor.execute("""
                 SELECT pf.*, p.full_name, p.team, p.position
                 FROM player_features pf
                 JOIN players p ON pf.player_id = p.player_id
                 WHERE pf.player_id = %s AND pf.season = %s AND pf.week = %s
-            """, (player_id, season, int(week)))
+            """, (player_id, season, week))
         else:
             cursor.execute("""
                 SELECT pf.*, p.full_name, p.team, p.position
@@ -318,16 +413,10 @@ def get_player_features(player_id):
         columns = [desc[0] for desc in cursor.description]
         row = cursor.fetchone()
 
-        conn.close()
+    if not row:
+        return jsonify({'error': 'No features found for player'}), 404
 
-        if not row:
-            return jsonify({'error': 'No features found for player'}), 404
-
-        return jsonify(dict(zip(columns, row)))
-
-    except Exception as e:
-        logger.error(f"Error fetching features: {e}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify(dict(zip(columns, row)))
 
 
 if __name__ == '__main__':
