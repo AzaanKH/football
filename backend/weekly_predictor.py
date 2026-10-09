@@ -627,7 +627,9 @@ class WeeklyPredictor:
             high = max(float(upper_bounds[i]), point)
             results.append({
                 'predicted_points': point,
-                'confidence_low': max(0.0, low),  # Can't be negative
+                # No floor at 0: PPR points go negative (kneel-downs, turnovers),
+                # and clipping broke the calibrated coverage for backup QBs
+                'confidence_low': low,
                 'confidence_high': high,
                 'source': sources[i],
             })
