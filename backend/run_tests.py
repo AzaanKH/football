@@ -27,12 +27,15 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 def run_command(cmd: list, description: str):
     """Run a command and print results."""
+    # Run pytest with this interpreter (the venv), not whichever pytest is on PATH
+    if cmd[0] == 'pytest':
+        cmd = [sys.executable, '-m', *cmd]
     print(f"\n{'='*60}")
     print(f"Running: {description}")
     print(f"Command: {' '.join(cmd)}")
     print('='*60 + "\n")
 
-    result = subprocess.run(cmd, shell=True if os.name == 'nt' else False)
+    result = subprocess.run(cmd)
     return result.returncode
 
 

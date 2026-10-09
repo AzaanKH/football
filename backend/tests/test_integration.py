@@ -139,6 +139,7 @@ class TestESPNAPIIntegration:
 
 @pytest.mark.integration
 @pytest.mark.slow
+@pytest.mark.skip(reason="Pro Football Reference blocks scripted requests (HTTP 403); scraper is off by default")
 class TestScraperIntegration:
     """
     Integration tests for Pro Football Reference scraper.

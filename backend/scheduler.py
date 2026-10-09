@@ -462,13 +462,21 @@ class FantasyScheduler:
     def get_status(self):
         """Get scheduler status."""
         jobs = self.scheduler.get_jobs()
+
+        def next_run(job):
+            # Jobs get next_run_time only once the scheduler starts
+            fire = getattr(job, 'next_run_time', None)
+            if fire is None and not self.scheduler.running:
+                fire = job.trigger.get_next_fire_time(None, datetime.now(job.trigger.timezone))
+            return fire
+
         return {
             'running': self.scheduler.running,
             'jobs': [
                 {
                     'id': job.id,
                     'name': job.name,
-                    'next_run': str(job.next_run_time) if job.next_run_time else None,
+                    'next_run': str(next_run(job)) if next_run(job) else None,
                     'trigger': str(job.trigger)
                 }
                 for job in jobs

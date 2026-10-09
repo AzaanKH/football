@@ -170,3 +170,13 @@ class TestSchedulerTimezone:
         now = datetime(2026, 10, 11, 9, 0, tzinfo=eastern)
         fire = gameday.trigger.get_next_fire_time(None, now)
         assert fire == datetime(2026, 10, 11, 11, 45, tzinfo=eastern)
+
+    @pytest.mark.unit
+    def test_status_before_start_shows_next_runs(self):
+        """Jobs have no next_run_time until the scheduler starts; status must not crash."""
+        status = scheduler.FantasyScheduler().get_status()
+
+        assert status['running'] is False
+        assert len(status['jobs']) == 7
+        for job in status['jobs']:
+            assert job['next_run'] and job['next_run'].endswith(('-04:00', '-05:00')), job
