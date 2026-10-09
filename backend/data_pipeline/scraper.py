@@ -359,6 +359,94 @@ def transform_pfr_fantasy_stats(df: pd.DataFrame, season: int) -> List[Dict]:
     return results
 
 
+# Weekly stat columns: our field -> (PFR header group or None, PFR column leaf).
+# Flattened MultiIndex headers look like 'Passing_Yds' or 'Unnamed: 1_level_0_Player',
+# so matching is on the exact first/last '_' segments, never on substrings.
+PFR_WEEKLY_COLUMNS = {
+    'full_name': (None, 'Player'),
+    'team': (None, 'Tm'),
+    'position': (None, 'FantPos'),
+    'passing_completions': ('Passing', 'Cmp'),
+    'passing_attempts': ('Passing', 'Att'),
+    'passing_yards': ('Passing', 'Yds'),
+    'passing_tds': ('Passing', 'TD'),
+    'interceptions': ('Passing', 'Int'),
+    'rushing_attempts': ('Rushing', 'Att'),
+    'rushing_yards': ('Rushing', 'Yds'),
+    'rushing_tds': ('Rushing', 'TD'),
+    'targets': ('Receiving', 'Tgt'),
+    'receptions': ('Receiving', 'Rec'),
+    'receiving_yards': ('Receiving', 'Yds'),
+    'receiving_tds': ('Receiving', 'TD'),
+    'fumbles_lost': (None, 'FL'),
+    'fantasy_points': (None, 'FantPt'),
+    'fantasy_points_ppr': (None, 'PPR'),
+}
+
+PFR_REQUIRED_FIELDS = ('full_name', 'fantasy_points_ppr')
+
+# Schema stat fields PFR's weekly fantasy table doesn't report
+_PFR_UNREPORTED_FIELDS = ('passing_2pt', 'rushing_2pt', 'receiving_2pt', 'fumbles')
+
+
+def _match_pfr_column(columns, group: Optional[str], leaf: str) -> Optional[str]:
+    """Find the column whose last '_' segment is leaf (and first is group, if given)."""
+    for col in columns:
+        parts = str(col).split('_')
+        if parts[-1] != leaf:
+            continue
+        if group is None or (len(parts) > 1 and parts[0] == group):
+            return col
+    return None
+
+
+def normalize_pfr_weekly_stats(df: pd.DataFrame, season: int, week: int) -> List[Dict]:
+    """
+    Normalize a PFR weekly fantasy table into player_weekly_stats rows.
+
+    Rows carry full_name/position/team for player-ID resolution but no
+    player_id; the caller must map names to Sleeper IDs before inserting.
+
+    Raises:
+        ValueError: If required columns (player name, PPR points) are missing,
+            so a format change fails loudly instead of storing zeros.
+    """
+    column_for = {
+        field: _match_pfr_column(df.columns, group, leaf)
+        for field, (group, leaf) in PFR_WEEKLY_COLUMNS.items()
+    }
+
+    missing_required = [f for f in PFR_REQUIRED_FIELDS if column_for[f] is None]
+    if missing_required:
+        raise ValueError(
+            f"PFR weekly table missing required columns {missing_required}; "
+            f"got {list(df.columns)}"
+        )
+
+    missing_optional = [f for f, col in column_for.items() if col is None]
+    if missing_optional:
+        logger.warning(f"PFR weekly table missing columns {missing_optional}; storing 0")
+
+    text_fields = {'full_name', 'team', 'position'}
+    rows = []
+    for _, record in df.iterrows():
+        row = {'season': season, 'week': week, 'source': 'scraped'}
+        for field, col in column_for.items():
+            value = record[col] if col is not None else None
+            if field in text_fields:
+                row[field] = None if value is None or pd.isna(value) else str(value).strip()
+            else:
+                number = pd.to_numeric(value, errors='coerce')
+                row[field] = 0 if pd.isna(number) else float(number)
+        for field in _PFR_UNREPORTED_FIELDS:
+            row[field] = 0
+
+        if row['full_name'] and row['full_name'] != 'Player':  # skip repeated header rows
+            rows.append(row)
+
+    return rows
+
+
 if __name__ == "__main__":
     # Quick test
     logging.basicConfig(level=logging.INFO)

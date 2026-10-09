@@ -209,13 +209,84 @@ def mock_db_connection():
 # Database Fixtures for E2E Tests
 # =============================================================================
 
+DEFAULT_TEST_DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/football_test'
+SCHEMA_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'init_db.sql')
+
+
+def get_test_database_url() -> str:
+    """Database URL used by E2E tests (never the development database)."""
+    return os.getenv('TEST_DATABASE_URL', DEFAULT_TEST_DATABASE_URL)
+
+
+def assert_safe_test_database(url: str) -> str:
+    """
+    Refuse to run destructive tests against a non-test database.
+
+    E2E fixtures TRUNCATE every table, so the target database name must
+    contain 'test' and must not match the development database (DB_NAME).
+
+    Returns:
+        The validated database name
+    """
+    from psycopg2.extensions import parse_dsn
+
+    dbname = parse_dsn(url).get('dbname', '')
+    dev_dbname = os.getenv('DB_NAME', 'football_dev')
+
+    if not dbname or 'test' not in dbname.lower() or dbname == dev_dbname:
+        raise RuntimeError(
+            f"Refusing to run E2E tests against database '{dbname}'. "
+            f"Set TEST_DATABASE_URL to a dedicated test database "
+            f"(name must contain 'test' and differ from DB_NAME='{dev_dbname}')."
+        )
+    return dbname
+
+
+def _server_url(url: str) -> str:
+    """Same server/credentials as url, but connected to the 'postgres' maintenance DB."""
+    from psycopg2.extensions import parse_dsn, make_dsn
+
+    params = parse_dsn(url)
+    params['dbname'] = 'postgres'
+    return make_dsn(**params)
+
+
+def ensure_test_database(url: str) -> None:
+    """Create the test database and apply init_db.sql if it doesn't exist yet."""
+    import psycopg2
+
+    dbname = assert_safe_test_database(url)
+
+    admin = psycopg2.connect(_server_url(url))
+    admin.autocommit = True
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+            exists = cursor.fetchone() is not None
+            if not exists:
+                cursor.execute(f'CREATE DATABASE "{dbname}"')
+    finally:
+        admin.close()
+
+    if exists:
+        return
+
+    conn = psycopg2.connect(url)
+    try:
+        with open(SCHEMA_FILE, encoding='utf-8') as f:
+            with conn.cursor() as cursor:
+                cursor.execute(f.read())
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @pytest.fixture(scope="session")
 def docker_db_url() -> str:
-    """Database URL for Docker PostgreSQL."""
-    return os.getenv(
-        'TEST_DATABASE_URL',
-        'postgresql://postgres:postgres@localhost:5432/football_dev'
-    )
+    """Database URL for the dedicated E2E test database."""
+    url = get_test_database_url()
+    ensure_test_database(url)
+    return url
 
 
 @pytest.fixture(scope="function")
@@ -225,6 +296,9 @@ def clean_test_db(docker_db_url):
     Truncates all tables before and after each test.
     """
     import psycopg2
+
+    # Re-check right before truncating, in case the fixture is ever reused elsewhere
+    assert_safe_test_database(docker_db_url)
 
     conn = None
     try:
@@ -336,11 +410,11 @@ def capture_logs(caplog):
 # =============================================================================
 
 def is_docker_running() -> bool:
-    """Check if Docker database is accessible."""
+    """Check if the Docker PostgreSQL server is accessible."""
     import psycopg2
     try:
         conn = psycopg2.connect(
-            'postgresql://postgres:postgres@localhost:5432/football_dev',
+            _server_url(get_test_database_url()),
             connect_timeout=3
         )
         conn.close()

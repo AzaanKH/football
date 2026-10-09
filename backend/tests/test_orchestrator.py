@@ -148,26 +148,95 @@ class TestDataOrchestratorUnit:
         assert result['processed'] == 2
         mocks['sleeper'].get_weekly_stats.assert_called_once_with(2024, 10)
 
+    @staticmethod
+    def _stat_inserts(cursor):
+        """Row dicts passed to player_weekly_stats INSERTs."""
+        return [
+            c.args[1] for c in cursor.execute.call_args_list
+            if len(c.args) > 1 and 'INSERT INTO player_weekly_stats' in c.args[0]
+        ]
+
+    @pytest.mark.unit
+    def test_sync_weekly_stats_fallback_off_by_default(self, mock_orchestrator):
+        """PFR blocks automated requests, so scraping must be opt-in."""
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = {}
+
+        with pytest.raises(Exception, match="No stats data available"):
+            mocks['orchestrator'].sync_weekly_stats(2024, 10)
+
+        mocks['scraper'].get_weekly_fantasy_stats.assert_not_called()
+
     @pytest.mark.unit
     def test_sync_weekly_stats_fallback_to_scraper(self, mock_orchestrator):
-        """Test fallback to scraper when API fails."""
-        mocks = mock_orchestrator
-        mocks['sleeper'].get_weekly_stats.return_value = {}  # API fails
-
-        # Mock scraper response
+        """Scraped stats keep their values, are labeled 'scraped', and use Sleeper IDs."""
         import pandas as pd
-        scraper_df = pd.DataFrame({
-            'Player': ['Test Player'],
-            'Tm': ['TST'],
-            'FantPt': [100.0]
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = {}
+        mocks['scraper'].get_weekly_fantasy_stats.return_value = pd.DataFrame({
+            'Unnamed: 1_level_0_Player': ['Saquon Barkley', 'Unknown Rookie'],
+            'Unnamed: 2_level_0_Tm': ['PHI', 'NYJ'],
+            'Unnamed: 3_level_0_FantPos': ['RB', 'WR'],
+            'Rushing_Att': [26, 0],
+            'Rushing_Yds': [159, 0],
+            'Rushing_TD': [2, 0],
+            'Receiving_Rec': [3, 4],
+            'Receiving_Yds': [24, 51],
+            'Fantasy_PPR': [33.3, 9.1],
         })
-        mocks['scraper'].get_weekly_fantasy_stats.return_value = scraper_df
         cursor = mocks['db']['cursor']
-        cursor.rowcount = 1
+        cursor.fetchall.return_value = [('4866', 'Saquon Barkley', 'RB', 'PHI')]
+        cursor.fetchone.return_value = (True,)
 
         result = mocks['orchestrator'].sync_weekly_stats(2024, 10, use_fallback=True)
 
-        mocks['scraper'].get_weekly_fantasy_stats.assert_called_once_with(2024, 10)
+        rows = self._stat_inserts(cursor)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row['player_id'] == '4866'
+        assert row['source'] == 'scraped'
+        assert row['week'] == 10
+        assert row['rushing_yards'] == 159
+        assert row['rushing_attempts'] == 26
+        assert row['receptions'] == 3
+        assert row['fantasy_points_ppr'] == 33.3
+        assert result['unmatched'] == 1
+        assert result['processed'] == 1
+
+    @pytest.mark.unit
+    def test_sync_weekly_stats_scraper_format_change_fails_loudly(self, mock_orchestrator):
+        """A scraped table without PPR points must fail, not store zeros."""
+        import pandas as pd
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = {}
+        mocks['scraper'].get_weekly_fantasy_stats.return_value = pd.DataFrame({
+            'Player': ['Test Player'], 'Tm': ['TST'], 'FantPt': [100.0]
+        })
+
+        with pytest.raises(ValueError, match='fantasy_points_ppr'):
+            mocks['orchestrator'].sync_weekly_stats(2024, 10, use_fallback=True)
+
+        assert self._stat_inserts(mocks['db']['cursor']) == []
+
+    @pytest.mark.unit
+    def test_sync_weekly_stats_upsert_refreshes_every_column(self, mock_orchestrator,
+                                                             sample_weekly_stats):
+        """Re-syncing must update all stat columns and the source label."""
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
+        cursor = mocks['db']['cursor']
+        cursor.fetchone.return_value = (False,)
+
+        result = mocks['orchestrator'].sync_weekly_stats(2024, 10)
+
+        sql = next(
+            c.args[0] for c in cursor.execute.call_args_list
+            if 'INSERT INTO player_weekly_stats' in c.args[0]
+        )
+        for column in ('rushing_attempts', 'interceptions', 'fumbles_lost', 'source'):
+            assert f'{column} = EXCLUDED.{column}' in sql
+        assert result['updated'] == result['processed']
+        assert result['inserted'] == 0
 
     @pytest.mark.unit
     def test_sync_weekly_stats_no_fallback(self, mock_orchestrator):

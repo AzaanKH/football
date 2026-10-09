@@ -1,8 +1,11 @@
 import { render, screen } from '@testing-library/react';
+import axios from 'axios';
 import App from './App';
 
-test('renders learn react link', () => {
+jest.mock('axios');
+
+test('renders the predictor without a backend', async () => {
+  axios.get.mockRejectedValue(new Error('Network Error'));
   render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Fantasy Football Predictor' })).toBeInTheDocument();
 });

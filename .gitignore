@@ -21,7 +21,8 @@ npm-debug.log
 .idea/
 
 # Claude
-.claude/
+.claude/*
+!.claude/skills/
 .mcp.json
 tmpclaude-*
 nul

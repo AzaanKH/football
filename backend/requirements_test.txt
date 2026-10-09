@@ -1,19 +1,21 @@
-# Test Dependencies
+# Test Dependencies (pinned; tested on Python 3.13)
 # Install with: pip install -r requirements_test.txt
 
 # Testing framework
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-mock>=3.12.0
-pytest-cov>=4.1.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-mock==3.16.0
+pytest-cov==7.1.0
+pytest-timeout==2.4.0  # backs the `timeout = 60` setting in pytest.ini
 
 # HTTP mocking
-responses>=0.25.0
-respx>=0.20.0
+responses==0.26.3
+respx==0.23.1
 
 # Test utilities
-freezegun>=1.4.0
-faker>=22.0.0
+freezegun==1.5.5
+faker==40.40.0
 
-# Include data pipeline dependencies
+# Include app + data pipeline dependencies
+-r requirements.txt
 -r requirements_data_pipeline.txt

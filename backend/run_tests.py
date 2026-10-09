@@ -41,7 +41,7 @@ def check_docker():
     try:
         import psycopg2
         conn = psycopg2.connect(
-            'postgresql://postgres:postgres@localhost:5432/football_dev',
+            'postgresql://postgres:postgres@localhost:5432/postgres',
             connect_timeout=3
         )
         conn.close()

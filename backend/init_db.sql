@@ -1,8 +1,6 @@
 -- Fantasy Football Database Schema
 -- This script runs automatically when the Docker container starts
-
--- Enable TimescaleDB extension
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+-- (only on a fresh volume). Plain PostgreSQL: no extensions required.
 
 -- Players table (from Sleeper API)
 CREATE TABLE IF NOT EXISTS players (
@@ -32,10 +30,14 @@ CREATE INDEX IF NOT EXISTS idx_players_position ON players(position);
 CREATE INDEX IF NOT EXISTS idx_players_team ON players(team);
 CREATE INDEX IF NOT EXISTS idx_players_name ON players(full_name);
 
--- Weekly stats table (time-series data)
+-- Weekly stats table: one row per player per week.
+-- Deliberately a plain table, not a TimescaleDB hypertable: hypertables require
+-- every unique key to include the partition column, which conflicts with the
+-- (player_id, season, week) key the pipeline upserts on. At ~100k rows/season,
+-- ordinary B-tree indexes are plenty.
 CREATE TABLE IF NOT EXISTS player_weekly_stats (
-    id SERIAL,
-    time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id SERIAL PRIMARY KEY,
+    time TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- ingestion timestamp
     player_id VARCHAR(50) NOT NULL,
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,
@@ -75,9 +77,6 @@ CREATE TABLE IF NOT EXISTS player_weekly_stats (
 
     CONSTRAINT unique_player_week UNIQUE (player_id, season, week)
 );
-
--- Convert to hypertable for time-series optimization
-SELECT create_hypertable('player_weekly_stats', 'time', if_not_exists => TRUE);
 
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_stats_player ON player_weekly_stats(player_id);
