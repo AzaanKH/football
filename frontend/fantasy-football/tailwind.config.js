@@ -7,7 +7,20 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Barlow', 'system-ui', 'sans-serif'],
+        condensed: ['"Barlow Condensed"', 'Barlow', 'system-ui', 'sans-serif'],
+      },
       colors: {
+        // Field palette (validated with the dataviz palette checks)
+        turf: '#173A2A',
+        sideline: '#21503A',
+        yardline: '#2E5B43',
+        chalk: { DEFAULT: '#EEF2EA', secondary: '#B8C7BC', muted: '#93AC9D' },
+        scrimmage: '#3D8EF0',
+        pylon: { DEFAULT: '#FF7A1A', ink: '#1B1208' },
+        flag: '#D9A80F',
+        out: '#E5484D',
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
@@ -56,25 +69,10 @@ module.exports = {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
-        "pulse-glow": {
-          "0%, 100%": { boxShadow: "0 0 20px rgba(34, 197, 94, 0.4)" },
-          "50%": { boxShadow: "0 0 40px rgba(34, 197, 94, 0.8)" },
-        },
-        "slide-up": {
-          from: { transform: "translateY(10px)", opacity: "0" },
-          to: { transform: "translateY(0)", opacity: "1" },
-        },
-        "fade-in": {
-          from: { opacity: "0" },
-          to: { opacity: "1" },
-        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
-        "pulse-glow": "pulse-glow 2s ease-in-out infinite",
-        "slide-up": "slide-up 0.3s ease-out",
-        "fade-in": "fade-in 0.3s ease-out",
       },
     },
   },

@@ -49,6 +49,8 @@ class WeeklyPrediction:
     status: str = 'ok'
     reason: Optional[str] = None
     message: Optional[str] = None
+    # Game context for display: team, opponent, is_home, kickoff, injury_status
+    context: Dict[str, object] = field(default_factory=dict)
 
 
 # Reasons a requested player can't be predicted
@@ -58,6 +60,7 @@ UNAVAILABLE_MESSAGES = {
     'unsupported_position': 'No model is trained for this position.',
     'no_history': 'No games played before this week, so there is no history to predict from.',
     'features_unavailable': 'Features could not be computed for this player.',
+    'bye': "On bye this week (no game on the team's schedule).",
 }
 
 BOOL_FEATURES = ('is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5')
@@ -634,17 +637,64 @@ class WeeklyPredictor:
         return results
 
     def _get_player_metadata(self, player_ids: List[str]) -> Dict[str, Dict[str, Optional[str]]]:
-        """Map player_id -> {player_name, position, team} for requested players."""
+        """Map player_id -> {player_name, position, team, injury_status} for requested players."""
         placeholders = ','.join(['%s'] * len(player_ids))
         cursor = self.db_connection.cursor()
         cursor.execute(f"""
-            SELECT player_id, full_name, position, team
+            SELECT player_id, full_name, position, team, injury_status
             FROM players
             WHERE player_id IN ({placeholders})
         """, player_ids)
         return {
-            row[0]: {'player_name': row[1], 'position': row[2], 'team': row[3]}
+            row[0]: {'player_name': row[1], 'position': row[2], 'team': row[3],
+                     'injury_status': row[4] or None}
             for row in cursor.fetchall()
+        }
+
+    def _get_schedule(self, season: int, week: int) -> Dict[str, Dict[str, object]]:
+        """
+        Team -> {opponent, is_home, kickoff} for the week. Empty when the
+        week's schedule hasn't been synced (so byes can't be inferred).
+        """
+        cursor = self.db_connection.cursor()
+        cursor.execute("""
+            SELECT team, opponent, is_home, game_date
+            FROM team_weekly_matchups
+            WHERE season = %s AND week = %s
+        """, (season, week))
+        return {
+            row[0]: {'opponent': row[1], 'is_home': row[2],
+                     'kickoff': row[3].isoformat() if row[3] else None}
+            for row in cursor.fetchall()
+        }
+
+    def _get_played_ids(self, player_ids: List[str], season: int, week: int) -> set:
+        """
+        Players with a game played in (season, week). players.team is the
+        *current* team, so for a past week it can be wrong after a trade;
+        a player who played that week was not on bye, whatever it says.
+        """
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id FROM player_weekly_stats
+            WHERE player_id IN ({placeholders})
+                AND season = %s AND week = %s AND played
+        """, (*player_ids, season, week))
+        return {row[0] for row in cursor.fetchall()}
+
+    @staticmethod
+    def _game_context(meta: Dict, schedule: Dict) -> Dict[str, object]:
+        """Display context for a player: team, this week's game, injury status."""
+        team = meta.get('team')
+        game = schedule.get(team) or {}
+        return {
+            'team': team,
+            'opponent': game.get('opponent'),
+            'is_home': game.get('is_home'),
+            'kickoff': game.get('kickoff'),
+            # Current status from the last players sync, not as of `week`
+            'injury_status': meta.get('injury_status'),
         }
 
     def get_player_features(self, player_ids: List[str], season: int, week: int,
@@ -729,13 +779,15 @@ class WeeklyPredictor:
         return {'opponent': row[0], 'is_home': row[1]} if row else {}
 
     @staticmethod
-    def _unavailable(player_id: str, player_name: Optional[str], reason: str) -> WeeklyPrediction:
+    def _unavailable(player_id: str, player_name: Optional[str], reason: str,
+                     context: Optional[Dict] = None) -> WeeklyPrediction:
         return WeeklyPrediction(
             player_id=player_id,
             player_name=player_name,
             status='unavailable',
             reason=reason,
             message=UNAVAILABLE_MESSAGES[reason],
+            context=context or {},
         )
 
     @staticmethod
@@ -785,6 +837,8 @@ class WeeklyPredictor:
             return []
 
         metadata = self._get_player_metadata(player_ids)
+        schedule = self._get_schedule(season, week)
+        played = self._get_played_ids(player_ids, season, week) if schedule else set()
         features_df = self.get_player_features(player_ids, season, week, metadata)
         if not features_df.empty:
             projections = self._get_projections(player_ids, season, week)
@@ -806,15 +860,26 @@ class WeeklyPredictor:
             name = meta['player_name']
             pos = (meta['position'] or '').lower()
             features = features_by_id.get(pid)
+            context = self._game_context(meta, schedule)
+            # Only infer a bye when the week's schedule is known, and never
+            # for a player who played that week (they may have changed teams)
+            on_bye = (bool(schedule) and meta.get('team') and meta['team'] not in schedule
+                      and pid not in played)
 
+            reason = None
             if position and pos != position.lower():
-                unavailable.append(self._unavailable(pid, name, 'position_mismatch'))
+                reason = 'position_mismatch'
+            elif on_bye:
+                reason = 'bye'
             elif pos not in self.models:
-                unavailable.append(self._unavailable(pid, name, 'unsupported_position'))
+                reason = 'unsupported_position'
             elif features is None:
-                unavailable.append(self._unavailable(pid, name, 'features_unavailable'))
+                reason = 'features_unavailable'
             elif not has_history(features):
-                unavailable.append(self._unavailable(pid, name, 'no_history'))
+                reason = 'no_history'
+
+            if reason:
+                unavailable.append(self._unavailable(pid, name, reason, context))
             else:
                 to_predict.setdefault(pos, []).append(pid)
 
@@ -831,6 +896,7 @@ class WeeklyPredictor:
                     confidence_low=round(pred['confidence_low'], 1),
                     confidence_high=round(pred['confidence_high'], 1),
                     features_used=self._feature_summary(row, pred['source']),
+                    context=self._game_context(metadata[pid], schedule),
                 ))
 
         predicted.sort(key=lambda p: p.predicted_points, reverse=True)

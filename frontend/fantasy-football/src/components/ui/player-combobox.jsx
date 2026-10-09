@@ -83,39 +83,39 @@ export function PlayerCombobox({
           role="combobox"
           aria-expanded={open}
           aria-label={value ? `Player: ${value.name}` : placeholder}
-          className="w-full justify-between bg-slate-700/50 border-slate-600 text-white hover:bg-slate-700 hover:text-white"
+          className="w-full justify-between border-yardline bg-turf font-normal text-chalk hover:bg-turf/70 hover:text-chalk"
         >
           {value ? (
             <span className="truncate">
               {value.name} {value.team ? `(${value.team})` : ''}
             </span>
           ) : (
-            <span className="text-slate-400">{placeholder}</span>
+            <span className="text-chalk-muted">{placeholder}</span>
           )}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[350px] p-0 bg-slate-800 border-slate-700" align="start">
+      <PopoverContent className="w-[min(350px,calc(100vw-2rem))] border-yardline bg-popover p-0" align="start">
         {/* Filtering happens on the server; cmdk only handles keyboard navigation */}
         <Command className="bg-transparent" shouldFilter={false}>
           <CommandInput
             value={query}
             onValueChange={setQuery}
             placeholder="Search by name or team..."
-            className="text-white placeholder:text-slate-400"
+            className="text-chalk placeholder:text-chalk-muted"
           />
           <CommandList className="max-h-[300px]">
             {status === "idle" && (
-              <CommandEmpty className="text-slate-400 py-6 text-center text-sm">
+              <CommandEmpty className="py-6 text-center text-sm text-chalk-secondary">
                 No player found.
               </CommandEmpty>
             )}
             {status === "loading" && visible.length === 0 && (
-              <div className="text-slate-400 py-6 text-center text-sm">Searching...</div>
+              <div className="py-6 text-center text-sm text-chalk-secondary">Searching...</div>
             )}
             {status === "error" && (
-              <div role="alert" className="text-destructive py-6 text-center text-sm">
-                Search failed. Is the backend running?
+              <div role="alert" className="py-6 text-center text-sm text-chalk">
+                Search failed. Check that the backend is running.
               </div>
             )}
             <CommandGroup>
@@ -130,17 +130,17 @@ export function PlayerCombobox({
                       onValueChange(isSelected ? null : player)
                       handleOpenChange(false)
                     }}
-                    className="text-white hover:bg-slate-700 aria-selected:bg-slate-700 cursor-pointer"
+                    className="cursor-pointer text-chalk aria-selected:bg-accent aria-selected:text-chalk"
                   >
                     <Check
                       className={cn(
                         "mr-2 h-4 w-4",
-                        isSelected ? "opacity-100 text-primary" : "opacity-0"
+                        isSelected ? "opacity-100 text-scrimmage" : "opacity-0"
                       )}
                     />
                     <span className="flex-1 truncate">{player.name}</span>
                     {player.team && (
-                      <span className="text-slate-400 text-xs ml-2">{player.team}</span>
+                      <span className="ml-2 text-xs text-chalk-secondary">{player.team}</span>
                     )}
                   </CommandItem>
                 )

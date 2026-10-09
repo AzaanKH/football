@@ -1,16 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Plus, X } from 'lucide-react';
 import './index.css';
 
-// shadcn components
 import { Button } from './components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select';
 import { PlayerCombobox } from './components/ui/player-combobox';
-import { Badge } from './components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
-import { Skeleton } from './components/ui/skeleton';
-import { Progress } from './components/ui/progress';
-import { Separator } from './components/ui/separator';
+import { RangeField } from './components/range-field';
 
 import {
   errorMessage,
@@ -22,93 +18,70 @@ import {
 } from './lib/api';
 import { buildRequest, isStale, requestKey } from './lib/predictionState';
 
-// Icons
-const FootballIcon = () => (
-  <svg className="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <ellipse cx="12" cy="12" rx="9" ry="5" transform="rotate(45 12 12)" />
-    <path d="M12 2v20M2 12h20" transform="rotate(45 12 12)" />
-  </svg>
-);
+const POSITIONS = [
+  { value: 'qb', short: 'QB', label: 'Quarterbacks' },
+  { value: 'rb', short: 'RB', label: 'Running backs' },
+  { value: 'wr', short: 'WR', label: 'Wide receivers' },
+];
 
-const UserIcon = () => (
-  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-    <circle cx="12" cy="7" r="4" />
-  </svg>
-);
+// Points between the top two projections below which the call is too close to rank
+const CLOSE_CALL_POINTS = 1.5;
 
-const TrophyIcon = () => (
-  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
-    <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
-    <path d="M4 22h16" />
-    <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
-    <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
-    <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
-  </svg>
-);
+const timeFormat = new Intl.DateTimeFormat(undefined, {
+  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
+const dateFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 
-const PlusIcon = () => (
-  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M12 5v14M5 12h14" />
-  </svg>
-);
+const formatTime = (iso) => (iso ? timeFormat.format(new Date(iso)) : null);
+const formatDate = (iso) => (iso ? dateFormat.format(new Date(iso)) : null);
 
-const TrashIcon = () => (
-  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-  </svg>
-);
+/** The decision the comparison supports, in one line. */
+function verdict(predictions) {
+  const [first, second] = predictions;
+  if (!first) return null;
+  if (!second) {
+    return {
+      title: `${first.playerName} projects ${first.predictedPoints.toFixed(1)} points`,
+      detail: 'Add another player to compare.',
+    };
+  }
+  const gap = first.predictedPoints - second.predictedPoints;
+  if (gap < CLOSE_CALL_POINTS) {
+    return {
+      title: `Close call: ${first.playerName} or ${second.playerName}`,
+      detail: `Only ${gap.toFixed(1)} points apart, and their ranges overlap.`,
+    };
+  }
+  return {
+    title: `Start ${first.playerName}`,
+    detail: `Projects ${gap.toFixed(1)} more points than ${second.playerName}.`,
+  };
+}
 
-const SparklesIcon = () => (
-  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z" />
-  </svg>
-);
-
-const ChartIcon = () => (
-  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M3 3v18h18" />
-    <path d="M18 17V9M13 17V5M8 17v-3" />
-  </svg>
-);
-
-const CalendarIcon = () => (
-  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-    <line x1="16" y1="2" x2="16" y2="6" />
-    <line x1="8" y1="2" x2="8" y2="6" />
-    <line x1="3" y1="10" x2="21" y2="10" />
-  </svg>
-);
-
-const TrendUpIcon = () => (
-  <svg className="w-4 h-4 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
-    <polyline points="17 6 23 6 23 12" />
-  </svg>
-);
-
-const TrendDownIcon = () => (
-  <svg className="w-4 h-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <polyline points="23 18 13.5 8.5 8.5 13.5 1 6" />
-    <polyline points="17 18 23 18 23 12" />
-  </svg>
-);
-
-const positionInfo = {
-  qb: { label: 'Quarterback', color: 'bg-red-500', emoji: '🏈' },
-  rb: { label: 'Running Back', color: 'bg-blue-500', emoji: '🏃' },
-  wr: { label: 'Wide Receiver', color: 'bg-green-500', emoji: '🎯' },
-};
-
-
-// How each point prediction was produced (backend `projection_source`)
-const SOURCE_LABELS = {
-  sleeper: 'Sleeper projection',
-  'sleeper+model': 'Sleeper projection, model-adjusted',
-  model: 'Model estimate (no Sleeper projection)',
-};
+function Freshness({ result }) {
+  const { freshness, request, currentWeek } = result;
+  if (!freshness) return null;
+  const lines = [];
+  const projections = formatTime(freshness.projections_synced_at);
+  lines.push(projections
+    ? `Projections for week ${request.week} updated ${projections}.`
+    : `No Sleeper projections synced for week ${request.week}; these use the model estimate.`);
+  if (freshness.stats_through) {
+    lines.push(`Stats through ${freshness.stats_through.season} week ${freshness.stats_through.week}.`);
+  }
+  const players = formatDate(freshness.players_synced_at);
+  if (players) lines.push(`Player and injury info from ${players}.`);
+  const isCurrent = currentWeek
+    && currentWeek.season === request.season && currentWeek.week === request.week;
+  if (currentWeek && !isCurrent) {
+    lines.push(`Injury status is shown only for the current week (${currentWeek.season} week ${currentWeek.week}).`);
+  }
+  return (
+    <p className="mt-8 max-w-prose text-sm leading-relaxed text-chalk-muted">
+      {lines.join(' ')} All points are PPR.
+    </p>
+  );
+}
 
 let nextSlotKey = 0;
 const newSlot = () => ({ key: nextSlotKey++, player: null });
@@ -121,7 +94,7 @@ const App = () => {
   const [season, setSeason] = useState(null);
   const [availableWeeks, setAvailableWeeks] = useState([]);
   const [week, setWeek] = useState(null);
-  // A result remembers the request that produced it: {request, predictions, unavailable}
+  // A result remembers the request that produced it: {request, predictions, unavailable, ...}
   const [result, setResult] = useState(null);
   const [isLoadingPredictions, setIsLoadingPredictions] = useState(false);
   const [error, setError] = useState(null);
@@ -140,7 +113,7 @@ const App = () => {
         setSeasons(data.seasons);
         setSeason(data.default);
       })
-      .catch(() => setSetupError('Could not reach the backend. Make sure it is running.'));
+      .catch(() => setSetupError("Can't reach the prediction server. Start the backend, then reload."));
   }, []);
 
   // Load weeks for the season; default to the latest week with data
@@ -157,7 +130,7 @@ const App = () => {
         setSetupError(weeks.length ? null : `No prediction data for the ${season} season yet.`);
       })
       .catch((err) => {
-        if (!isCancel(err)) setSetupError('Failed to load weeks for this season.');
+        if (!isCancel(err)) setSetupError(`Couldn't load the weeks for ${season}. Try reloading.`);
       });
 
     return () => controller.abort();
@@ -199,7 +172,7 @@ const App = () => {
   const getPredictions = async () => {
     const request = currentRequest;
     if (request.playerIds.length === 0) {
-      setError('Please select at least one player.');
+      setError('Pick at least one player to compare.');
       return;
     }
 
@@ -220,14 +193,17 @@ const App = () => {
           confidenceLow: p.confidence_low,
           confidenceHigh: p.confidence_high,
           features: p.features,
+          context: p.context,
         })),
         // Players the backend couldn't predict, each with a human-readable reason
         unavailable: data.unavailable || [],
+        freshness: data.freshness,
+        currentWeek: data.current_week,
       });
     } catch (err) {
       if (isCancel(err)) return;
       console.error('Error fetching predictions:', err);
-      setError(errorMessage(err, 'Failed to get predictions.'));
+      setError(errorMessage(err, "Couldn't get predictions. Check that the backend is running, then try again."));
     } finally {
       if (inFlight.current?.controller === controller) {
         inFlight.current = null;
@@ -239,161 +215,84 @@ const App = () => {
   const predictions = result?.predictions ?? [];
   const unavailable = result?.unavailable ?? [];
   const resultWeek = result?.request.week;
-  const maxPoints = predictions.length
-    ? Math.max(...predictions.map((p) => p.predictedPoints)) * 1.1
-    : 30;
   const selectedCount = currentRequest.playerIds.length;
   const selectedIds = players.filter(Boolean).map((p) => p.player_id);
   const ready = season != null && week != null;
+  const call = verdict(predictions);
+  const showInjuries = Boolean(
+    result?.currentWeek
+    && result.currentWeek.season === result.request.season
+    && result.currentWeek.week === result.request.week
+  );
+  const modelDown = systemStatus && !systemStatus.weekly_predictor_available;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
-      {/* Header */}
-      <header className="border-b border-slate-700 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-50">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-primary/20 rounded-lg text-primary animate-float">
-                <FootballIcon />
-              </div>
-              <div>
-                <h1 className="text-xl font-bold text-white">Fantasy Football Predictor</h1>
-                <p className="text-sm text-slate-400">
-                  {ready ? `${season} · Week ${week} Predictions` : 'Loading...'}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {systemStatus?.weekly_predictor_available ? (
-                <Badge variant="outline" className="text-primary border-primary">
-                  <SparklesIcon />
-                  <span className="ml-1">Model Ready</span>
-                </Badge>
-              ) : (
-                <Badge variant="outline" className="text-yellow-500 border-yellow-500">
-                  Model Unavailable
-                </Badge>
-              )}
-            </div>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-turf text-chalk">
+      {/* One control bar: everything that scopes the comparison */}
+      <header className="border-b border-yardline">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-8 gap-y-3 px-4 py-4">
+          <h1 className="font-condensed text-3xl font-bold leading-none tracking-tight">Start/Sit</h1>
 
-      <main className="container mx-auto px-4 py-8">
-        {setupError && (
-          <div role="alert" className="mb-6 p-3 rounded-lg bg-destructive/20 border border-destructive/50 text-destructive text-sm">
-            {setupError}
-          </div>
-        )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={season != null ? season.toString() : undefined}
+              onValueChange={(v) => setSeason(parseInt(v, 10))}
+              disabled={!seasons.length}
+            >
+              <SelectTrigger aria-label="Season" className="h-9 w-[8.5rem] border-yardline bg-sideline text-chalk">
+                <SelectValue placeholder="Season" />
+              </SelectTrigger>
+              <SelectContent>
+                {seasons.map((s) => (
+                  <SelectItem key={s} value={s.toString()}>{s} season</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
-        {/* Season / Week Selection */}
-        <Card className="mb-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-white flex items-center gap-2">
-              <CalendarIcon />
-              Prediction Week
-            </CardTitle>
-            <CardDescription className="text-slate-400">
-              Select the NFL week you want predictions for
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap items-center gap-4">
-              <Select
-                value={week != null ? week.toString() : undefined}
-                onValueChange={(v) => setWeek(parseInt(v, 10))}
-                disabled={!availableWeeks.length}
-              >
-                <SelectTrigger aria-label="Week" className="w-48 bg-slate-700/50 border-slate-600 text-white">
-                  <SelectValue placeholder="Select week" />
-                </SelectTrigger>
-                <SelectContent className="bg-slate-800 border-slate-700">
-                  {availableWeeks.map((w) => (
-                    <SelectItem
-                      key={w.week}
-                      value={w.week.toString()}
-                      className="text-white hover:bg-slate-700"
-                    >
-                      Week {w.week} {w.players > 0 ? `(${w.players} players)` : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select
-                value={season != null ? season.toString() : undefined}
-                onValueChange={(v) => setSeason(parseInt(v, 10))}
-                disabled={!seasons.length}
-              >
-                <SelectTrigger aria-label="Season" className="w-36 bg-slate-700/50 border-slate-600 text-white">
-                  <SelectValue placeholder="Season" />
-                </SelectTrigger>
-                <SelectContent className="bg-slate-800 border-slate-700">
-                  {seasons.map((s) => (
-                    <SelectItem key={s} value={s.toString()} className="text-white hover:bg-slate-700">
-                      Season {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </CardContent>
-        </Card>
+            <Select
+              value={week != null ? week.toString() : undefined}
+              onValueChange={(v) => setWeek(parseInt(v, 10))}
+              disabled={!availableWeeks.length}
+            >
+              <SelectTrigger aria-label="Week" className="h-9 w-[7rem] border-yardline bg-sideline text-chalk">
+                <SelectValue placeholder="Week" />
+              </SelectTrigger>
+              <SelectContent>
+                {availableWeeks.map((w) => (
+                  <SelectItem key={w.week} value={w.week.toString()}>Week {w.week}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
-        {/* Position Selection */}
-        <Card className="mb-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
-          <CardHeader>
-            <CardTitle className="text-white flex items-center gap-2">
-              <UserIcon />
-              Select Position
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Tabs value={position} onValueChange={handlePositionChange} className="w-full">
-              <TabsList className="grid w-full grid-cols-3 bg-slate-700/50">
-                {Object.entries(positionInfo).map(([key, info]) => (
+            <Tabs value={position} onValueChange={handlePositionChange}>
+              <TabsList aria-label="Position" className="h-9 border border-yardline bg-sideline p-0.5">
+                {POSITIONS.map((p) => (
                   <TabsTrigger
-                    key={key}
-                    value={key}
-                    className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                    key={p.value}
+                    value={p.value}
+                    aria-label={p.label}
+                    title={p.label}
+                    className="h-full rounded-sm px-3 font-condensed text-base font-semibold text-chalk-secondary data-[state=active]:bg-chalk data-[state=active]:text-turf"
                   >
-                    <span className="mr-2">{info.emoji}</span>
-                    {info.label}
+                    {p.short}
                   </TabsTrigger>
                 ))}
               </TabsList>
             </Tabs>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
+      </header>
 
-        <div className="grid lg:grid-cols-2 gap-6">
-          {/* Player Selection */}
-          <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm">
-            <CardHeader>
-              <CardTitle className="text-white flex items-center gap-2">
-                <ChartIcon />
-                Player Selection
-                <Badge className="ml-auto" variant="secondary">
-                  {selectedCount} selected
-                </Badge>
-              </CardTitle>
-              <CardDescription className="text-slate-400">
-                {ready ? `Compare players for your Week ${week} lineup` : 'Loading weeks...'}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {error && (
-                <div role="alert" className="p-3 rounded-lg bg-destructive/20 border border-destructive/50 text-destructive text-sm animate-bounce-in">
-                  {error}
-                </div>
-              )}
+      <main className="mx-auto grid max-w-6xl gap-10 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        {/* Players: first on mobile, right-hand column on desktop */}
+        <aside aria-labelledby="players-title" className="lg:col-start-2 lg:row-start-1">
+          <div className="rounded-lg bg-sideline p-4">
+            <h2 id="players-title" className="mb-3 font-condensed text-xl font-semibold">Your players</h2>
 
-              {slots.map((slot, index) => (
-                <div
-                  key={slot.key}
-                  className="flex gap-2 items-center animate-slide-up"
-                  style={{ animationDelay: `${index * 50}ms` }}
-                >
-                  <div className="flex-1">
+            <div className="space-y-2">
+              {slots.map((slot) => (
+                <div key={slot.key} className="flex items-center gap-2">
+                  <div className="min-w-0 flex-1">
                     <PlayerCombobox
                       position={position}
                       season={season}
@@ -405,213 +304,125 @@ const App = () => {
                     />
                   </div>
                   <Button
-                    variant="destructive"
+                    variant="ghost"
                     size="icon"
                     onClick={() => removePlayer(slot.key)}
-                    className="shrink-0"
+                    className="shrink-0 text-chalk-secondary hover:bg-turf hover:text-chalk"
                     aria-label={slot.player ? `Remove ${slot.player.name}` : 'Remove player slot'}
                   >
-                    <TrashIcon />
+                    <X className="h-4 w-4" aria-hidden="true" />
                   </Button>
                 </div>
               ))}
-
-              <Button
-                onClick={addPlayer}
-                variant="outline"
-                className="w-full border-dashed border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
-              >
-                <PlusIcon />
-                <span className="ml-2">Add Player</span>
-              </Button>
-
-              <Separator className="bg-slate-700" />
-
-              <Button
-                onClick={getPredictions}
-                className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-6"
-                disabled={!ready || isLoadingPredictions || selectedCount === 0}
-              >
-                {isLoadingPredictions ? (
-                  <div className="flex items-center gap-2">
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Analyzing Week {week}...
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <SparklesIcon />
-                    Predict Week {week ?? ''}
-                  </div>
-                )}
-              </Button>
-            </CardContent>
-          </Card>
-
-          {/* Predictions Results: labeled with the request that produced them */}
-          <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm">
-            <CardHeader>
-              <CardTitle className="text-white flex items-center gap-2">
-                <TrophyIcon />
-                {result ? `Week ${resultWeek} Predictions` : 'Predictions'}
-              </CardTitle>
-              <CardDescription className="text-slate-400">
-                {result
-                  ? `${result.request.season} season · PPR scoring`
-                  : 'Projected fantasy points for upcoming game'}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {stale && !isLoadingPredictions && (
-                <div
-                  role="status"
-                  className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500/50 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200"
-                >
-                  <span>These results are for your previous selection (Week {resultWeek}).</span>
-                  {ready && selectedCount > 0 && (
-                    <Button size="sm" variant="outline" onClick={getPredictions}>
-                      Update for Week {week}
-                    </Button>
-                  )}
-                </div>
-              )}
-
-              {isLoadingPredictions ? (
-                <div className="space-y-4">
-                  {[1, 2, 3].map((i) => (
-                    <div key={i} className="space-y-2">
-                      <Skeleton className="h-4 w-3/4 bg-slate-700" />
-                      <Skeleton className="h-8 w-full bg-slate-700" />
-                    </div>
-                  ))}
-                </div>
-              ) : result ? (
-                <div className={`space-y-4 ${stale ? 'opacity-60' : ''}`}>
-                  {predictions.map((player, index) => (
-                    <div
-                      key={player.playerId}
-                      className="animate-bounce-in"
-                      style={{ animationDelay: `${index * 100}ms` }}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-3">
-                          <div
-                            className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold text-sm ${
-                              index === 0
-                                ? 'bg-yellow-500 animate-glow'
-                                : index === 1
-                                ? 'bg-slate-400'
-                                : index === 2
-                                ? 'bg-amber-700'
-                                : 'bg-slate-600'
-                            }`}
-                          >
-                            {index + 1}
-                          </div>
-                          <div>
-                            <span className="text-white font-medium">{player.playerName}</span>
-                            {player.features?.trend === 'improving' && (
-                              <span className="ml-2" title="Trending up"><TrendUpIcon /></span>
-                            )}
-                            {player.features?.trend === 'declining' && (
-                              <span className="ml-2" title="Trending down"><TrendDownIcon /></span>
-                            )}
-                          </div>
-                        </div>
-                        <Badge
-                          className={`${
-                            index === 0
-                              ? 'bg-yellow-500/20 text-yellow-500 border-yellow-500/50'
-                              : 'bg-primary/20 text-primary border-primary/50'
-                          }`}
-                          variant="outline"
-                        >
-                          {player.predictedPoints.toFixed(1)} pts
-                        </Badge>
-                      </div>
-
-                      <Progress
-                        value={player.predictedPoints}
-                        max={maxPoints}
-                        className={`h-2 ${index === 0 ? 'bg-yellow-500/20' : 'bg-slate-700'}`}
-                      />
-
-                      <div className="flex items-center justify-between mt-1">
-                        <p className="text-xs text-slate-500">
-                          80% range: {player.confidenceLow.toFixed(1)} - {player.confidenceHigh.toFixed(1)} pts
-                          {SOURCE_LABELS[player.features?.projection_source] && (
-                            <> · {SOURCE_LABELS[player.features.projection_source]}</>
-                          )}
-                        </p>
-                        {player.features?.avg_3_games != null && (
-                          <p className="text-xs text-slate-500">
-                            3-game avg: {Number(player.features.avg_3_games).toFixed(1)}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-
-                  {unavailable.length > 0 && (
-                    <div className="space-y-2">
-                      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                        No prediction
-                      </p>
-                      {unavailable.map((player) => (
-                        <div
-                          key={player.player_id}
-                          className="flex items-start justify-between gap-3 rounded-md border border-slate-700 px-3 py-2"
-                        >
-                          <span className="text-slate-300">{player.player_name || player.player_id}</span>
-                          <span className="text-right text-xs text-slate-500">{player.message}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {predictions.length > 0 && (
-                    <>
-                      <Separator className="bg-slate-700 my-4" />
-                      <p className="text-center text-sm text-slate-400">
-                        <span className="text-primary font-semibold">{predictions[0].playerName}</span>
-                        {' '}is projected to score the most in Week {resultWeek}!
-                      </p>
-                    </>
-                  )}
-                </div>
-              ) : (
-                <div className="text-center py-12">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-700/50 flex items-center justify-center text-slate-500">
-                    <ChartIcon />
-                  </div>
-                  <p className="text-slate-400">No predictions yet</p>
-                  <p className="text-sm text-slate-500 mt-1">
-                    Select players and click "Predict Week {week ?? ''}" to see results
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Footer Info */}
-        <Card className="mt-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
-          <CardContent className="py-4">
-            <div className="flex flex-wrap items-center justify-center gap-4 text-sm text-slate-400">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                <span>Weekly Predictor</span>
-              </div>
-              <Separator orientation="vertical" className="h-4 bg-slate-700" />
-              <div className="flex items-center gap-2">
-                <span>Reliability + Matchup Features</span>
-              </div>
-              <Separator orientation="vertical" className="h-4 bg-slate-700" />
-              <div className="flex items-center gap-2">
-                <span>Rolling Averages + Matchups</span>
-              </div>
             </div>
-          </CardContent>
-        </Card>
+
+            <Button
+              onClick={addPlayer}
+              variant="ghost"
+              className="mt-2 w-full justify-start gap-2 text-chalk hover:bg-turf hover:text-chalk"
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Add player
+            </Button>
+
+            <Button
+              onClick={getPredictions}
+              className="mt-4 h-11 w-full bg-pylon font-condensed text-lg font-semibold text-pylon-ink hover:bg-pylon/90"
+              disabled={!ready || isLoadingPredictions || selectedCount === 0}
+            >
+              {isLoadingPredictions ? `Comparing week ${week}...` : `Compare week ${week ?? ''}`}
+            </Button>
+
+            {error && (
+              <p role="alert" className="mt-3 text-sm text-chalk">
+                <span className="mr-1 inline-block h-2 w-2 rounded-full bg-out" aria-hidden="true" />
+                {error}
+              </p>
+            )}
+          </div>
+        </aside>
+
+        {/* Results: the main focus */}
+        <section aria-labelledby="results-title" className="min-w-0 lg:col-start-1 lg:row-start-1">
+          {setupError && (
+            <p role="alert" className="mb-6 rounded-md border border-out/60 px-4 py-3 text-sm text-chalk">
+              {setupError}
+            </p>
+          )}
+          {modelDown && (
+            <p className="mb-6 rounded-md border border-flag/60 px-4 py-3 text-sm text-chalk">
+              Predictions are unavailable until the model is trained
+              (<code className="text-chalk-secondary">python weekly_predictor.py train</code>).
+            </p>
+          )}
+
+          {stale && !isLoadingPredictions && (
+            <div
+              role="status"
+              className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-md border border-flag/70 px-4 py-3 text-sm text-chalk"
+            >
+              <span>These results are for your previous selection (Week {resultWeek}).</span>
+              {ready && selectedCount > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={getPredictions}
+                  className="border-chalk/40 bg-transparent text-chalk hover:bg-sideline hover:text-chalk"
+                >
+                  Update for Week {week}
+                </Button>
+              )}
+            </div>
+          )}
+
+          {result ? (
+            <div aria-busy={isLoadingPredictions} className={isLoadingPredictions || stale ? 'opacity-60' : undefined}>
+              <p className="font-condensed text-lg text-chalk-secondary">
+                Week {resultWeek}, {result.request.season}
+              </p>
+              <h2 id="results-title" className="mb-1 font-condensed text-4xl font-bold leading-tight sm:text-5xl">
+                {call ? call.title : 'No players could be projected'}
+              </h2>
+              {call && <p className="mb-8 text-chalk-secondary">{call.detail}</p>}
+
+              {predictions.length > 0 && (
+                <RangeField
+                  predictions={predictions}
+                  showInjuries={showInjuries}
+                  animationKey={requestKey(result.request)}
+                />
+              )}
+
+              {unavailable.length > 0 && (
+                <div className="mt-8">
+                  <h3 className="mb-2 font-condensed text-xl font-semibold">Not projected</h3>
+                  <ul className="divide-y divide-yardline border-y border-yardline">
+                    {unavailable.map((player) => (
+                      <li key={player.player_id} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2">
+                        <span className="text-chalk">{player.player_name || player.player_id}</span>
+                        <span className="text-sm text-chalk-secondary">
+                          {player.reason === 'bye' ? 'Bye week' : player.message}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <Freshness result={result} />
+            </div>
+          ) : (
+            <div className="max-w-md">
+              <h2 id="results-title" className="mb-2 font-condensed text-4xl font-bold leading-tight">
+                {isLoadingPredictions ? `Comparing week ${week}...` : 'Who should you start?'}
+              </h2>
+              <p className="text-chalk-secondary">
+                Pick the players you're deciding between, then compare them. You'll see each
+                one's projected PPR points and the range they usually land in.
+              </p>
+            </div>
+          )}
+        </section>
       </main>
     </div>
   );
