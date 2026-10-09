@@ -95,7 +95,12 @@ npm run preview
 ```
 
 Dependencies are pinned in `backend/requirements*.txt`
-(`requirements_test.txt` includes the others).
+(`requirements_test.txt` includes the others). Runtimes: Python 3.11+
+(pinned NumPy/scikit-learn), Node 22.12+ or 24+ (Vitest 5; `.nvmrc`).
+
+CI (`.github/workflows/ci.yml`) runs on every PR, stacked ones included:
+backend unit tests, frontend `npm ci`/test/build, and a fresh PostgreSQL
+built from `init_db.sql` with every migration re-applied on top.
 
 ## Architecture
 
