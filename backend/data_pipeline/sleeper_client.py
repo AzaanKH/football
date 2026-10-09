@@ -135,6 +135,49 @@ class SleeperClient:
         logger.warning(f"No stats found for {season} week {week}")
         return {}
 
+    # Per-game stats with game context; v1 /stats has stats only
+    GAME_STATS_URL = "https://api.sleeper.com/stats/nfl"
+    GAME_STATS_POSITIONS = ('QB', 'RB', 'WR', 'TE', 'K')
+
+    def get_weekly_game_context(self, season: int, week: int) -> Dict[str, Dict]:
+        """
+        Per-game context for players active in a week.
+
+        Returns:
+            player_id -> {team, opponent, game_date (YYYY-MM-DD), off_snaps,
+            team_off_snaps}. Only players who were active appear; empty on
+            failure (context is an enrichment, never required).
+        """
+        self._rate_limit()
+        params = [('season_type', 'regular')] + [('position[]', p) for p in self.GAME_STATS_POSITIONS]
+        url = f"{self.GAME_STATS_URL}/{season}/{week}"
+        try:
+            response = self.client.get(url, params=params)
+            response.raise_for_status()
+            rows = response.json() or []
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(f"Game context unavailable for {season} week {week}: {e}")
+            return {}
+
+        def snaps(value):
+            return int(value) if isinstance(value, (int, float)) else None
+
+        context = {}
+        for row in rows:
+            player_id = row.get('player_id')
+            if not player_id:
+                continue
+            stats = row.get('stats') or {}
+            context[str(player_id)] = {
+                'team': row.get('team'),
+                'opponent': row.get('opponent'),
+                'game_date': row.get('date'),
+                'off_snaps': snaps(stats.get('off_snp')),
+                'team_off_snaps': snaps(stats.get('tm_off_snp')),
+            }
+        logger.info(f"Retrieved game context for {len(context)} players")
+        return context
+
     def get_season_stats(self, season: int) -> Dict[str, Dict]:
         """
         Fetch cumulative season stats for all players.

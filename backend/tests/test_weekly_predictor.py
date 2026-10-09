@@ -175,7 +175,6 @@ class TestPredictWeekContract:
 
         assert pred['confidence_low'] <= pred['predicted_points'] <= pred['confidence_high']
 
-
     @pytest.mark.unit
     def test_range_can_go_below_zero(self):
         """PPR points go negative (kneel-downs); a 0 floor broke backup-QB coverage."""
@@ -412,6 +411,107 @@ class TestGameContext:
         }
         assert by_id['rb_rookie'].reason == 'bye'
         assert by_id['rb_rookie'].context['team'] == 'NYG'
+
+    @pytest.mark.unit
+    def test_past_week_uses_the_team_the_player_was_on(self):
+        """Traded NYG -> PHI later: week 5 shows PHI's game, not a bye from NYG's schedule."""
+        predictor = _predictor_with_models()
+        features = pd.DataFrame([{'player_id': 'rb_rookie', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA),              patch.object(predictor, '_get_week_teams', return_value={'rb_rookie': 'PHI'}),              patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE),              patch.object(predictor, 'get_player_features', return_value=features) as get_features:
+            [result] = predictor.predict_week(['rb_rookie'], season=2025, week=5)
+
+        assert result.status == 'ok'
+        assert (result.context['team'], result.context['opponent']) == ('PHI', 'DAL')
+        # On-demand features get the same team
+        assert get_features.call_args.args[3]['rb_rookie']['team'] == 'PHI'
+
+    @pytest.mark.unit
+    def test_bye_follows_the_team_as_of_that_week(self):
+        """Now on PHI (who played), but on NYG then, and NYG had no game: a real bye."""
+        predictor = _predictor_with_models()
+        metadata = {'rb1': {**METADATA['rb1']}}
+        features = pd.DataFrame([{'player_id': 'rb1', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=metadata),              patch.object(predictor, '_get_week_teams', return_value={'rb1': 'NYG'}),              patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE),              patch.object(predictor, 'get_player_features', return_value=features):
+            [result] = predictor.predict_week(['rb1'], season=2025, week=5)
+
+        assert result.reason == 'bye'
+        assert result.context['team'] == 'NYG'
+
+    @staticmethod
+    def _week_teams(rows, week, finished=True):
+        predictor = _predictor_with_models()
+        predictor.db_connection.cursor.return_value.fetchall.return_value = rows
+        with patch.object(predictor, '_week_finished', return_value=finished):
+            return predictor._get_week_teams(['p'], 2025, week)
+
+    @pytest.mark.unit
+    def test_week_team_is_the_game_that_week(self):
+        rows = [('p', 4, 'NYG'), ('p', 5, 'PHI'), ('p', 6, 'PHI')]
+        assert self._week_teams(rows, 5) == {'p': 'PHI'}
+
+    @pytest.mark.unit
+    def test_week_team_for_a_missed_past_week_is_the_nearest_game_before(self):
+        rows = [('p', 3, 'NYG'), ('p', 4, 'NYG'), ('p', 7, 'PHI')]  # traded during weeks 5-6
+        assert self._week_teams(rows, 5) == {'p': 'NYG'}
+        # Nothing before (missed the start of the season): the nearest game after
+        assert self._week_teams([('p', 7, 'PHI')], 2) == {'p': 'PHI'}
+
+    @pytest.mark.unit
+    def test_upcoming_week_keeps_the_current_team(self):
+        rows = [('p', 3, 'NYG'), ('p', 4, 'NYG')]
+        assert self._week_teams(rows, 5, finished=False) == {}
+
+    @pytest.mark.unit
+    def test_finished_week_after_the_last_game_is_the_last_team(self):
+        """Out for the rest of the season (or injured now): a played week after
+        the final appearance keeps that team, not today's."""
+        rows = [('p', 3, 'PHI'), ('p', 4, 'PHI')]
+        assert self._week_teams(rows, 5, finished=True) == {'p': 'PHI'}
+        assert self._week_teams(rows, 18, finished=True) == {'p': 'PHI'}
+
+    @pytest.mark.unit
+    def test_missed_end_of_a_past_season_is_not_a_bye(self):
+        """PHI in weeks 3-4, NYG today; week 5 (finished): PHI played, NYG had a bye."""
+        predictor = _predictor_with_models()
+        predictor.db_connection.cursor.return_value.fetchall.return_value = [
+            ('rb_rookie', 3, 'PHI'), ('rb_rookie', 4, 'PHI'),
+        ]
+        features = pd.DataFrame([{'player_id': 'rb_rookie', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA), \
+             patch.object(predictor, '_week_finished', return_value=True), \
+             patch.object(predictor, '_get_played_ids', return_value=set()), \
+             patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE), \
+             patch.object(predictor, 'get_player_features', return_value=features):
+            [result] = predictor.predict_week(['rb_rookie'], season=2025, week=5)
+
+        assert result.status == 'ok'
+        assert (result.context['team'], result.context['opponent']) == ('PHI', 'DAL')
+
+    @pytest.mark.unit
+    def test_week_finished_from_the_schedule(self):
+        from datetime import datetime, timezone
+        predictor = _predictor_with_models()
+        last_kickoff = datetime(2026, 10, 13, 0, 15, tzinfo=timezone.utc)  # Monday night
+        predictor.db_connection.cursor.return_value.fetchone.return_value = (last_kickoff,)
+
+        during = datetime(2026, 10, 13, 2, 0, tzinfo=timezone.utc)
+        after = datetime(2026, 10, 13, 4, 30, tzinfo=timezone.utc)
+        assert predictor._week_finished(2026, 5, now=during) is False
+        assert predictor._week_finished(2026, 5, now=after) is True
+
+    @pytest.mark.unit
+    def test_week_finished_without_a_schedule_uses_the_calendar(self):
+        from datetime import datetime, timezone
+        predictor = _predictor_with_models()
+        predictor.db_connection.cursor.return_value.fetchone.return_value = (None,)
+
+        # 2025 opened Thu Sep 4: week 5 is Oct 2-6, done after Tuesday Oct 7
+        assert predictor._week_finished(2025, 5, now=datetime(2025, 10, 7, 12, tzinfo=timezone.utc)) is False
+        assert predictor._week_finished(2025, 5, now=datetime(2025, 10, 8, 12, tzinfo=timezone.utc)) is True
+        assert predictor._week_finished(2025, 18, now=datetime(2026, 10, 8, tzinfo=timezone.utc)) is True
 
     @pytest.mark.unit
     def test_no_bye_for_player_who_played_that_week(self):

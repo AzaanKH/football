@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS player_weekly_stats (
     source VARCHAR(20) DEFAULT 'sleeper',  -- 'sleeper', 'espn', 'scraped', 'manual'
     created_at TIMESTAMP DEFAULT NOW(),
 
+    -- Per-game context (Sleeper per-game stats): the team and opponent actually
+    -- played, the game date, and offensive snaps
+    team VARCHAR(5),
+    opponent VARCHAR(5),
+    game_date DATE,
+    off_snaps INTEGER,
+    team_off_snaps INTEGER,
+
     -- Sleeper also returns rows for inactive/benched players (0 pts, 0 opportunities).
     -- Rows with an opportunity or any fantasy points count as games played.
     played BOOLEAN GENERATED ALWAYS AS (
@@ -90,6 +98,9 @@ CREATE TABLE IF NOT EXISTS player_weekly_stats (
 CREATE INDEX IF NOT EXISTS idx_stats_player ON player_weekly_stats(player_id);
 CREATE INDEX IF NOT EXISTS idx_stats_season_week ON player_weekly_stats(season, week);
 CREATE INDEX IF NOT EXISTS idx_stats_player_season ON player_weekly_stats(player_id, season);
+CREATE INDEX IF NOT EXISTS idx_stats_opponent_week
+    ON player_weekly_stats(opponent, season, week)
+    WHERE played;
 CREATE INDEX IF NOT EXISTS idx_stats_player_played
     ON player_weekly_stats(player_id, season DESC, week DESC)
     WHERE played;
@@ -244,6 +255,7 @@ CREATE TABLE IF NOT EXISTS player_features (
     -- Trend Features (4 features)
     fantasy_pts_trend_3 DECIMAL(10,4),  -- linear regression slope
     usage_trend_3 DECIMAL(10,4),
+    snap_share_avg_3 DECIMAL(10,4),
     snap_share_trend_3 DECIMAL(10,4),
     target_share_trend_3 DECIMAL(10,4),
 

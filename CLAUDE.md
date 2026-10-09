@@ -42,7 +42,7 @@ football/
 │   │   ├── scraper.py           Pro Football Reference (blocked: HTTP 403; off by default)
 │   │   └── features/            Rolling averages, efficiency, consistency, trends, matchups
 │   ├── init_db.sql              Schema for a fresh volume
-│   ├── migrations/              001-004, applied manually to existing DBs
+│   ├── migrations/              001-005, applied manually to existing DBs
 │   ├── models/                  weekly_predictor.pkl (+ local backups; gitignored)
 │   └── tests/                   pytest: unit / integration / e2e
 ├── frontend/fantasy-football/   React 18 + Vite, Tailwind 4, shadcn/ui (Radix, cmdk)
@@ -137,6 +137,15 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
 `player_projections`, `team_weekly_matchups`, `player_features`,
 `ingestion_log`. `team_defense_stats` exists but is never populated.
 
+`player_weekly_stats` also stores each game's `team`, `opponent`,
+`game_date`, `off_snaps` and `team_off_snaps` (migration 005), from
+Sleeper's per-game feed (`api.sleeper.com/stats/nfl/...`,
+`SleeperClient.get_weekly_game_context`). Opponent defense vs position is
+computed from these rows (`features/matchups.py`: points allowed over each
+defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
+That feed is a second request: when it fails or omits a player, the stats
+upsert keeps the stored context (`COALESCE`) instead of writing NULL.
+
 ### API endpoints
 
 | Endpoint | Purpose |
@@ -217,10 +226,21 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
 
 ## Known limitations
 
-- Opponent-defense features are empty (`team_defense_stats` unpopulated);
-  snap counts are not stored. Both are candidate features to test.
-- Player team for opponent/bye is the *current* team (`players.team`), so
-  traded players can show the wrong matchup for past weeks (a player who
-  played that week is never marked on bye; no opponent is shown instead).
+- Opponent-defense rank and snap share are computed and stored but not used
+  by the model: tested in `evaluation.py` (2025 W7 - 2026 W3) they did not
+  beat Sleeper's projection for any position (Sleeper already prices in
+  matchup and role), and for QB they made the correction worse.
+- Opponent/bye use the player's team *as of the requested week*
+  (`WeeklyPredictor._get_week_teams`): the team they played for that week;
+  for a finished week they missed (including after their last game of a
+  season), their nearest game before it (else after); for upcoming weeks,
+  the current team (`players.team`). "Finished" follows the synced schedule
+  (`_week_finished`), else the date estimate. A
+  trade between the last game and an upcoming week is only reflected once
+  the players sync picks it up.
 - Injury status is current-only; the UI shows it only for the current week.
-- QB range coverage is ~76% vs the 80% target (calibration drift).
+- Ranges are not floored at 0: PPR points go negative (kneel-downs,
+  turnovers), and a 0 floor had pulled backup-QB coverage down (QB 75% ->
+  81% after removing it).
+- Coverage is calibrated on average, not per tier: high-projection RBs
+  (Sleeper 16+) were covered ~68% on the held-out weeks.

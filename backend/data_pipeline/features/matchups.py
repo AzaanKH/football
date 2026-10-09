@@ -5,6 +5,7 @@ Computes matchup-based features including opponent strength,
 home/away indicator, and days rest.
 """
 
+from datetime import date
 from typing import Dict, Optional
 from decimal import Decimal
 import logging
@@ -23,6 +24,7 @@ class MatchupFeatures:
             cursor: Database cursor for executing queries
         """
         self.cursor = cursor
+        self._defense_cache: Dict = {}
 
     def compute(
         self,
@@ -30,7 +32,8 @@ class MatchupFeatures:
         season: int,
         week: int,
         opponent: Optional[str] = None,
-        is_home: Optional[bool] = None
+        is_home: Optional[bool] = None,
+        game_date: Optional[date] = None,
     ) -> Dict[str, Optional[any]]:
         """
         Compute matchup features for a player's upcoming game.
@@ -41,6 +44,7 @@ class MatchupFeatures:
             week: The week to compute features for
             opponent: Opponent team abbreviation (e.g., 'KC', 'BUF')
             is_home: Whether the player is playing at home
+            game_date: Date of this week's game, for real days of rest
 
         Returns:
             Dictionary with 4 matchup features
@@ -63,7 +67,7 @@ class MatchupFeatures:
                 features['opp_fantasy_pts_allowed'] = opp_stats.get('pts_allowed')
 
         # Calculate days rest since last game
-        features['days_rest'] = self._get_days_rest(player_id, season, week)
+        features['days_rest'] = self._get_days_rest(player_id, season, week, game_date)
 
         return features
 
@@ -82,6 +86,11 @@ class MatchupFeatures:
         row = self.cursor.fetchone()
         return row[0] if row else None
 
+    # Defense form: average over the defense's most recent games (across seasons)
+    DEFENSE_WINDOW_GAMES = 8
+    # Fewer games than this and the average is too noisy to use
+    DEFENSE_MIN_GAMES = 3
+
     def _get_opponent_defense(
         self,
         team: str,
@@ -90,86 +99,91 @@ class MatchupFeatures:
         week: int
     ) -> Optional[Dict]:
         """
-        Get opponent's defense stats against a position.
-
-        Uses team_defense_stats table if available, otherwise computes from historical data.
+        Opponent's recent fantasy points allowed to a position, and its rank.
 
         Args:
-            team: Team abbreviation
+            team: Opponent team abbreviation
             position: Position to check (QB, RB, WR, TE)
             season: Season year
-            week: Week number
+            week: Week being predicted (only earlier games are used)
 
         Returns:
-            Dictionary with rank and pts_allowed or None
+            {'rank': 1 = fewest points allowed (toughest) .. 32,
+             'pts_allowed': average PPR allowed per game} or None
         """
-        # Try to get from team_defense_stats table
-        rank_column = f"rank_vs_{position.lower()}"
-        pts_column = f"fantasy_points_allowed_{position.lower()}"
+        return self._defense_table(season, week).get((team, position.upper()))
 
-        # Get most recent defense stats before this week
-        query = f"""
-            SELECT {rank_column}, {pts_column}
-            FROM team_defense_stats
-            WHERE team = %s AND season = %s AND week < %s
-            ORDER BY week DESC
-            LIMIT 1
+    def _defense_table(self, season: int, week: int) -> Dict:
         """
-        try:
-            self.cursor.execute(query, (team, season, week))
-            row = self.cursor.fetchone()
-            if row:
-                return {'rank': row[0], 'pts_allowed': Decimal(str(row[1])) if row[1] else None}
-        except Exception as e:
-            logger.debug(f"Could not get defense stats from table: {e}")
+        (defense, position) -> {rank, pts_allowed} using games before the week.
 
-        # Fallback: Calculate from historical data
-        return self._calculate_defense_stats(team, position, season, week)
-
-    def _calculate_defense_stats(
-        self,
-        team: str,
-        position: str,
-        season: int,
-        week: int
-    ) -> Optional[Dict]:
+        Built once per (season, week) from per-game opponents in
+        player_weekly_stats and cached; every player that week shares it.
         """
-        Calculate opponent defense stats from historical player performance.
+        key = (season, week)
+        if key in self._defense_cache:
+            return self._defense_cache[key]
 
-        Computes average fantasy points allowed to a position by looking at
-        all games where players of that position played against this team.
+        self.cursor.execute("""
+            WITH games AS (
+                SELECT s.season, s.week, s.opponent AS defense, p.position,
+                       SUM(s.fantasy_points_ppr) AS pts
+                FROM player_weekly_stats s
+                JOIN players p ON p.player_id = s.player_id
+                WHERE s.played
+                  AND s.opponent IS NOT NULL
+                  AND p.position IN ('QB', 'RB', 'WR', 'TE')
+                  AND (s.season < %s OR (s.season = %s AND s.week < %s))
+                GROUP BY s.season, s.week, s.opponent, p.position
+            ),
+            recent AS (
+                SELECT defense, position, pts,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY defense, position ORDER BY season DESC, week DESC
+                       ) AS game_rank
+                FROM games
+            )
+            SELECT defense, position, AVG(pts), COUNT(*)
+            FROM recent
+            WHERE game_rank <= %s
+            GROUP BY defense, position
+            HAVING COUNT(*) >= %s
+        """, (season, season, week, self.DEFENSE_WINDOW_GAMES, self.DEFENSE_MIN_GAMES))
 
-        Args:
-            team: Team abbreviation
-            position: Position to check
-            season: Season year
-            week: Week number
+        by_position: Dict[str, list] = {}
+        for defense, position, pts, _games in self.cursor.fetchall():
+            by_position.setdefault(position, []).append((float(pts), defense))
 
-        Returns:
-            Dictionary with estimated pts_allowed or None
+        table = {}
+        for position, entries in by_position.items():
+            for rank, (pts, defense) in enumerate(sorted(entries), start=1):
+                table[(defense, position)] = {
+                    'rank': rank,
+                    'pts_allowed': Decimal(str(round(pts, 2))),
+                }
+
+        self._defense_cache[key] = table
+        return table
+
+    def _get_days_rest(self, player_id: str, season: int, week: int,
+                       game_date: Optional[date] = None) -> Optional[int]:
         """
-        # This query requires knowing which team each player faced each week
-        # For now, return None as we don't have schedule data
-        # This could be enhanced later with schedule/matchup data
-        return None
+        Days since the player's previous game this season.
 
-    def _get_days_rest(self, player_id: str, season: int, week: int) -> Optional[int]:
-        """
-        Calculate days since player's last game.
-
-        Standard NFL schedule: 7 days between games, unless bye week.
+        Uses real game dates when both are known (Thursday/Monday games,
+        byes); otherwise approximates 7 days per week.
 
         Args:
             player_id: Player's unique ID
             season: Current season
             week: Current week
+            game_date: Date of this week's game, if known
 
         Returns:
-            Days since last game, typically 7 for normal weeks
+            Days of rest, or None before the player's first game of the season
         """
-        # Check if player played the previous week
         query = """
-            SELECT week
+            SELECT week, game_date
             FROM player_weekly_stats
             WHERE player_id = %s
               AND played
@@ -185,12 +199,10 @@ class MatchupFeatures:
             # No previous game this season - could be first game or injury
             return None
 
-        last_week = row[0]
-        weeks_since = week - last_week
-
-        # Standard NFL rest is 7 days per week
-        # Bye weeks or missed games result in more rest
-        return weeks_since * 7
+        last_week, last_date = row
+        if game_date and last_date:
+            return (game_date - last_date).days
+        return (week - last_week) * 7
 
     def compute_batch(
         self,

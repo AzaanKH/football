@@ -167,6 +167,26 @@ class TestDataOrchestratorUnit:
         assert result['skipped_unknown'] == 2
         assert result['processed'] == len(sample_weekly_stats)
 
+    @pytest.mark.unit
+    def test_sync_weekly_stats_merges_game_context(self, mock_orchestrator, sample_weekly_stats):
+        """Opponent, date and snaps come from the per-game feed; missing context stays NULL."""
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
+        with_context, without = list(sample_weekly_stats)
+        mocks['sleeper'].get_weekly_game_context.return_value = {
+            with_context: {'team': 'SF', 'opponent': 'TB', 'game_date': '2024-11-10',
+                           'off_snaps': 56, 'team_off_snaps': 70},
+        }
+        cursor = mocks['db']['cursor']
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
+
+        result = mocks['orchestrator'].sync_weekly_stats(2024, 10)
+
+        rows = {row['player_id']: row for row in self._stat_inserts(cursor)}
+        assert rows[with_context]['opponent'] == 'TB' and rows[with_context]['off_snaps'] == 56
+        assert rows[without]['opponent'] is None and rows[without]['team_off_snaps'] is None
+        assert result['with_context'] == 1
+
     @staticmethod
     def _stat_inserts(cursor):
         """Row dicts passed to player_weekly_stats INSERTs."""
@@ -257,6 +277,27 @@ class TestDataOrchestratorUnit:
             assert f'{column} = EXCLUDED.{column}' in sql
         assert result['updated'] == result['processed']
         assert result['inserted'] == 0
+
+    @pytest.mark.unit
+    def test_sync_weekly_stats_keeps_context_when_enrichment_fails(self, mock_orchestrator,
+                                                                   sample_weekly_stats):
+        """A failed game-context request sends NULLs; the upsert must not store them over context."""
+        mocks = mock_orchestrator
+        mocks['sleeper'].get_weekly_stats.return_value = sample_weekly_stats
+        mocks['sleeper'].get_weekly_game_context.return_value = {}
+        cursor = mocks['db']['cursor']
+        cursor.fetchall.return_value = [(pid,) for pid in sample_weekly_stats]
+        cursor.fetchone.return_value = (False,)
+
+        mocks['orchestrator'].sync_weekly_stats(2024, 10)
+
+        sql = next(
+            c.args[0] for c in cursor.execute.call_args_list
+            if 'INSERT INTO player_weekly_stats' in c.args[0]
+        )
+        for column in ('team', 'opponent', 'game_date', 'off_snaps', 'team_off_snaps'):
+            assert f'{column} = COALESCE(EXCLUDED.{column}, player_weekly_stats.{column})' in sql
+        assert all(row['team'] is None for row in self._stat_inserts(cursor))
 
     @pytest.mark.unit
     def test_sync_weekly_stats_no_fallback(self, mock_orchestrator):

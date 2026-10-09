@@ -21,6 +21,7 @@ import os
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -674,9 +675,9 @@ class WeeklyPredictor:
 
     def _get_played_ids(self, player_ids: List[str], season: int, week: int) -> set:
         """
-        Players with a game played in (season, week). players.team is the
-        *current* team, so for a past week it can be wrong after a trade;
-        a player who played that week was not on bye, whatever it says.
+        Players with a game played in (season, week): never on bye that week,
+        even when their team for it is unknown (stats synced before per-game
+        team was stored) and the current team had no game.
         """
         placeholders = ','.join(['%s'] * len(player_ids))
         cursor = self.db_connection.cursor()
@@ -686,6 +687,59 @@ class WeeklyPredictor:
                 AND season = %s AND week = %s AND played
         """, (*player_ids, season, week))
         return {row[0] for row in cursor.fetchall()}
+
+    def _get_week_teams(self, player_ids: List[str], season: int, week: int) -> Dict[str, str]:
+        """
+        The team each player was on in (season, week), from per-game stats:
+        the team they played for that week; for a past week without a game
+        (bye, inactive, out for the rest of the season), their nearest game
+        before it, else the nearest after. Upcoming weeks are left out, so the
+        current team (players.team) applies.
+        """
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id, week, team FROM player_weekly_stats
+            WHERE player_id IN ({placeholders})
+                AND season = %s AND team IS NOT NULL
+        """, (*player_ids, season))
+        games: Dict[str, Dict[int, str]] = {}
+        for player_id, game_week, team in cursor.fetchall():
+            games.setdefault(player_id, {})[game_week] = team
+
+        teams = {}
+        finished = None
+        for player_id, by_week in games.items():
+            if week in by_week:
+                teams[player_id] = by_week[week]
+                continue
+            # A later game proves the week is past; otherwise ask the calendar
+            # (a player's last game of a season is not the season's last week)
+            past = any(w > week for w in by_week)
+            if not past:
+                if finished is None:
+                    finished = self._week_finished(season, week)
+                past = finished
+            if past:
+                before = [w for w in by_week if w < week]
+                teams[player_id] = by_week[max(before) if before else min(by_week)]
+        return teams
+
+    def _week_finished(self, season: int, week: int, now: Optional[datetime] = None) -> bool:
+        """
+        Whether every game of (season, week) is over: its last kickoff (synced
+        schedule) plus GAME_DURATION has passed, as in data_pipeline.season.
+        Without a synced schedule, from the date estimate: the Tuesday after
+        the week's Thursday has passed.
+        """
+        from data_pipeline.season import GAME_DURATION, schedule_week_end, season_opener
+
+        now = now or datetime.now(timezone.utc)
+        end = schedule_week_end(self.db_connection)(season, week)
+        if end is not None:
+            return now >= end + GAME_DURATION
+        week_tuesday = season_opener(season) + timedelta(days=7 * (week - 1) + 5)
+        return now.date() > week_tuesday
 
     @staticmethod
     def _game_context(meta: Dict, schedule: Dict) -> Dict[str, object]:
@@ -776,11 +830,12 @@ class WeeklyPredictor:
             return {}
         cursor = self.db_connection.cursor()
         cursor.execute("""
-            SELECT opponent, is_home FROM team_weekly_matchups
+            SELECT opponent, is_home, (game_date AT TIME ZONE 'America/New_York')::date
+            FROM team_weekly_matchups
             WHERE team = %s AND season = %s AND week = %s
         """, (team, season, week))
         row = cursor.fetchone()
-        return {'opponent': row[0], 'is_home': row[1]} if row else {}
+        return {'opponent': row[0], 'is_home': row[1], 'game_date': row[2]} if row else {}
 
     @staticmethod
     def _unavailable(player_id: str, player_name: Optional[str], reason: str,
@@ -841,6 +896,13 @@ class WeeklyPredictor:
             return []
 
         metadata = self._get_player_metadata(player_ids)
+        # Team as of the requested week, not today's (trades), for display,
+        # bye detection and on-demand features alike
+        week_teams = self._get_week_teams(list(metadata), season, week) if metadata else {}
+        metadata = {
+            pid: {**meta, 'team': week_teams.get(pid, meta.get('team'))}
+            for pid, meta in metadata.items()
+        }
         schedule = self._get_schedule(season, week)
         played = self._get_played_ids(player_ids, season, week) if schedule else set()
         features_df = self.get_player_features(player_ids, season, week, metadata)

@@ -245,7 +245,34 @@ class DataOrchestrator:
         'rushing_attempts', 'rushing_yards', 'rushing_tds', 'rushing_2pt',
         'targets', 'receptions', 'receiving_yards', 'receiving_tds', 'receiving_2pt',
         'fumbles', 'fumbles_lost', 'source',
+    ] + [
+        # Per-game context (merged from Sleeper's per-game stats when available)
+        'team', 'opponent', 'game_date', 'off_snaps', 'team_off_snaps',
     ]
+    GAME_CONTEXT_COLUMNS = ('team', 'opponent', 'game_date', 'off_snaps', 'team_off_snaps')
+
+    @classmethod
+    def weekly_stats_upsert_sql(cls) -> str:
+        """
+        Upsert for one player_weekly_stats row (named %(column)s parameters).
+
+        Stat columns always take the new value (stat corrections). Game context
+        comes from a separate request that may fail or omit players, so a NULL
+        never overwrites context already stored.
+        """
+        columns = ['player_id', 'season', 'week'] + cls.WEEKLY_STAT_COLUMNS
+        assignments = [
+            f'{c} = COALESCE(EXCLUDED.{c}, player_weekly_stats.{c})'
+            if c in cls.GAME_CONTEXT_COLUMNS else f'{c} = EXCLUDED.{c}'
+            for c in cls.WEEKLY_STAT_COLUMNS
+        ]
+        return f"""
+            INSERT INTO player_weekly_stats ({', '.join(columns)})
+            VALUES ({', '.join(f'%({c})s' for c in columns)})
+            ON CONFLICT (player_id, season, week) DO UPDATE SET
+                {', '.join(assignments)}
+            RETURNING (xmax = 0) AS inserted
+        """
 
     @staticmethod
     def _known_player_ids(conn) -> set:
@@ -322,6 +349,15 @@ class DataOrchestrator:
                     for player_id, player_stats in weekly_stats.items()
                     if player_id in known_ids
                 ]
+                # Team/opponent/date/snaps for players who were active
+                if rows:
+                    game_context = self.sleeper.get_weekly_game_context(season, week)
+                    if not game_context:
+                        logger.warning(f"No game context for {season} week {week}; "
+                                       f"keeping any stored team/opponent/snaps")
+                    for row in rows:
+                        row.update(game_context.get(row['player_id'], {}))
+                    stats['with_context'] = sum(1 for r in rows if r.get('opponent'))
                 if stats['skipped_unknown']:
                     logger.info(f"Skipped {stats['skipped_unknown']} stat rows for untracked players")
 
@@ -338,17 +374,11 @@ class DataOrchestrator:
                     raise Exception("No stats data available")
 
                 cursor = conn.cursor()
-                columns = ['player_id', 'season', 'week'] + self.WEEKLY_STAT_COLUMNS
-                insert_sql = f"""
-                    INSERT INTO player_weekly_stats ({', '.join(columns)})
-                    VALUES ({', '.join(f'%({c})s' for c in columns)})
-                    ON CONFLICT (player_id, season, week) DO UPDATE SET
-                        {', '.join(f'{c} = EXCLUDED.{c}' for c in self.WEEKLY_STAT_COLUMNS)}
-                    RETURNING (xmax = 0) AS inserted
-                """
+                insert_sql = self.weekly_stats_upsert_sql()
 
                 for row in rows:
                     stats['processed'] += 1
+                    row = {**dict.fromkeys(self.GAME_CONTEXT_COLUMNS), **row}
 
                     try:
                         # Use savepoint to allow recovery from individual errors
