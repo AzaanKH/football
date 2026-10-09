@@ -237,7 +237,14 @@ upsert keeps the stored context (`COALESCE`) instead of writing NULL.
 - Opponent-defense rank and snap share are computed and stored but not used
   by the model: tested in `evaluation.py` (2025 W7 - 2026 W3) they did not
   beat Sleeper's projection for any position (Sleeper already prices in
-  matchup and role), and for QB they made the correction worse.
+  matchup and role). Opponent defense was a model input while it was always
+  empty; once populated the QB correction no longer beat Sleeper (re-run
+  2025 W8 - 2026 W4: QB MAE 5.70 without it, 5.95 = Sleeper with it), so it
+  was taken out of the feature lists.
+- The QB correction is kept only if it is no worse than Sleeper on start/sit
+  in the newest 20% of weeks. In the Oct 2026 retrain it lowered MAE
+  (5.95 -> 5.70) but lost by 0.07 pt of start/sit, so the saved QB model
+  uses Sleeper as-is; the next weekly retrain re-checks.
 - Opponent/bye use the player's team *as of the requested week*
   (`WeeklyPredictor._get_week_teams`): the team they played for that week;
   for a finished week they missed (including after their last game of a
