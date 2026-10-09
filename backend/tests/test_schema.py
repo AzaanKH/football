@@ -88,6 +88,34 @@ class TestFreshSchema:
         assert cursor.fetchone() == (1, 18.0)
 
     @requires_docker
+    def test_resync_without_game_context_keeps_stored_context(self, fresh_schema_db):
+        """Stat corrections apply; a failed or partial enrichment never erases context."""
+        from data_pipeline.orchestrator import DataOrchestrator as Orchestrator
+
+        cursor = fresh_schema_db.cursor()
+        cursor.execute("INSERT INTO players (player_id, full_name, position) VALUES ('p1', 'Test', 'WR')")
+        upsert = Orchestrator.weekly_stats_upsert_sql()
+        stats = dict.fromkeys(Orchestrator.WEEKLY_STAT_COLUMNS, 0)
+        stats.update(player_id='p1', season=2025, week=5, targets=8, source='sleeper')
+
+        context = dict(team='PHI', opponent='DAL', game_date='2025-10-05',
+                       off_snaps=50, team_off_snaps=65)
+        cursor.execute(upsert, {**stats, 'fantasy_points_ppr': 12.5, **context})
+        # Enrichment failed: every context field NULL, stats corrected
+        cursor.execute(upsert, {**stats, 'fantasy_points_ppr': 14.0,
+                                **dict.fromkeys(Orchestrator.GAME_CONTEXT_COLUMNS)})
+        # Partial enrichment: snaps updated, the rest missing
+        cursor.execute(upsert, {**stats, 'fantasy_points_ppr': 14.0,
+                                **dict.fromkeys(Orchestrator.GAME_CONTEXT_COLUMNS), 'off_snaps': 52})
+        fresh_schema_db.commit()
+
+        cursor.execute("""
+            SELECT fantasy_points_ppr, team, opponent, game_date::text, off_snaps, team_off_snaps
+            FROM player_weekly_stats WHERE player_id = 'p1'
+        """)
+        assert cursor.fetchone() == (14.0, 'PHI', 'DAL', '2025-10-05', 52, 65)
+
+    @requires_docker
     def test_played_flag_requires_an_opportunity(self, fresh_schema_db):
         """Inactive weeks (0 points, 0 opportunities) must not count as games."""
         cursor = fresh_schema_db.cursor()

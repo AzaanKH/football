@@ -143,6 +143,8 @@ Sleeper's per-game feed (`api.sleeper.com/stats/nfl/...`,
 `SleeperClient.get_weekly_game_context`). Opponent defense vs position is
 computed from these rows (`features/matchups.py`: points allowed over each
 defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
+That feed is a second request: when it fails or omits a player, the stats
+upsert keeps the stored context (`COALESCE`) instead of writing NULL.
 
 ### API endpoints
 
@@ -230,8 +232,10 @@ defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
   matchup and role), and for QB they made the correction worse.
 - Opponent/bye use the player's team *as of the requested week*
   (`WeeklyPredictor._get_week_teams`): the team they played for that week;
-  for a past week they missed, their nearest game before it (else after);
-  otherwise, as for upcoming weeks, the current team (`players.team`). A
+  for a finished week they missed (including after their last game of a
+  season), their nearest game before it (else after); for upcoming weeks,
+  the current team (`players.team`). "Finished" follows the synced schedule
+  (`_week_finished`), else the date estimate. A
   trade between the last game and an upcoming week is only reflected once
   the players sync picks it up.
 - Injury status is current-only; the UI shows it only for the current week.
