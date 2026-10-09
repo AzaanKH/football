@@ -631,7 +631,9 @@ class WeeklyPredictor:
             high = max(float(upper_bounds[i]), point)
             results.append({
                 'predicted_points': point,
-                'confidence_low': max(0.0, low),  # Can't be negative
+                # No floor at 0: PPR points go negative (kneel-downs, turnovers),
+                # and clipping broke the calibrated coverage for backup QBs
+                'confidence_low': low,
                 'confidence_high': high,
                 'source': sources[i],
             })
@@ -669,6 +671,21 @@ class WeeklyPredictor:
                      'kickoff': row[3].isoformat() if row[3] else None}
             for row in cursor.fetchall()
         }
+
+    def _get_played_ids(self, player_ids: List[str], season: int, week: int) -> set:
+        """
+        Players with a game played in (season, week). players.team is the
+        *current* team, so for a past week it can be wrong after a trade;
+        a player who played that week was not on bye, whatever it says.
+        """
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id FROM player_weekly_stats
+            WHERE player_id IN ({placeholders})
+                AND season = %s AND week = %s AND played
+        """, (*player_ids, season, week))
+        return {row[0] for row in cursor.fetchall()}
 
     @staticmethod
     def _game_context(meta: Dict, schedule: Dict) -> Dict[str, object]:
@@ -825,6 +842,7 @@ class WeeklyPredictor:
 
         metadata = self._get_player_metadata(player_ids)
         schedule = self._get_schedule(season, week)
+        played = self._get_played_ids(player_ids, season, week) if schedule else set()
         features_df = self.get_player_features(player_ids, season, week, metadata)
         if not features_df.empty:
             projections = self._get_projections(player_ids, season, week)
@@ -847,8 +865,10 @@ class WeeklyPredictor:
             pos = (meta['position'] or '').lower()
             features = features_by_id.get(pid)
             context = self._game_context(meta, schedule)
-            # Only infer a bye when the week's schedule is known
-            on_bye = bool(schedule) and meta.get('team') and meta['team'] not in schedule
+            # Only infer a bye when the week's schedule is known, and never
+            # for a player who played that week (they may have changed teams)
+            on_bye = (bool(schedule) and meta.get('team') and meta['team'] not in schedule
+                      and pid not in played)
 
             reason = None
             if position and pos != position.lower():

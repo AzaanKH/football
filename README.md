@@ -53,8 +53,8 @@ The backend serves a single weekly prediction system built on Postgres feature e
 
 ### Prerequisites
 
-- Python 3.8+
-- Node.js 16+
+- Python 3.11+ (the pinned NumPy and scikit-learn require it; CI uses 3.13)
+- Node.js 22.12+ or 24+ (Vite 8 needs 20.19+, Vitest 5 needs 22.12+; CI uses 22.12)
 - Docker Desktop
 
 ### 1. Start the database
