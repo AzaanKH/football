@@ -100,6 +100,7 @@ const App = () => {
   const [players, setPlayers] = useState([]);
   const [selectedPlayerIds, setSelectedPlayerIds] = useState([]);
   const [predictions, setPredictions] = useState([]);
+  const [unavailable, setUnavailable] = useState([]);
   const [week, setWeek] = useState(15);
   const [season] = useState(2025);
   const [availableWeeks, setAvailableWeeks] = useState([]);
@@ -165,6 +166,7 @@ const App = () => {
     setPosition(value);
     setSelectedPlayerIds([]);
     setPredictions([]);
+    setUnavailable([]);
   };
 
   const handlePlayerChange = (index, playerId) => {
@@ -206,6 +208,8 @@ const App = () => {
         ConfidenceHigh: p.confidence_high,
         features: p.features
       })));
+      // Players the backend couldn't predict, each with a human-readable reason
+      setUnavailable(response.data.unavailable || []);
     } catch (error) {
       console.error('Error fetching predictions:', error);
       setError(error.response?.data?.error || 'Failed to get predictions.');
@@ -422,7 +426,7 @@ const App = () => {
                     </div>
                   ))}
                 </div>
-              ) : predictions.length > 0 ? (
+              ) : predictions.length > 0 || unavailable.length > 0 ? (
                 <div className="space-y-4">
                   {predictions.map((player, index) => (
                     <div
@@ -447,10 +451,11 @@ const App = () => {
                           </div>
                           <div>
                             <span className="text-white font-medium">{player.PlayerName}</span>
-                            {player.features?.trend && (
-                              <span className="ml-2">
-                                {player.features.trend === 'improving' ? <TrendUpIcon /> : <TrendDownIcon />}
-                              </span>
+                            {player.features?.trend === 'improving' && (
+                              <span className="ml-2" title="Trending up"><TrendUpIcon /></span>
+                            )}
+                            {player.features?.trend === 'declining' && (
+                              <span className="ml-2" title="Trending down"><TrendDownIcon /></span>
                             )}
                           </div>
                         </div>
@@ -487,6 +492,23 @@ const App = () => {
                       )}
                     </div>
                   ))}
+
+                  {unavailable.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                        No prediction
+                      </p>
+                      {unavailable.map((player) => (
+                        <div
+                          key={player.player_id}
+                          className="flex items-start justify-between gap-3 rounded-md border border-slate-700 px-3 py-2"
+                        >
+                          <span className="text-slate-300">{player.player_name || player.player_id}</span>
+                          <span className="text-right text-xs text-slate-500">{player.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <Separator className="bg-slate-700 my-4" />
 

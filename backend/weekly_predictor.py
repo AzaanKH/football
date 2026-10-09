@@ -19,10 +19,9 @@ import pickle
 import os
 import logging
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
@@ -32,13 +31,64 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WeeklyPrediction:
-    """Container for weekly prediction results."""
+    """
+    Result for one requested player.
+
+    status is 'ok' (prediction fields set) or 'unavailable' (reason/message
+    explain why; prediction fields are None). Every requested player gets one.
+    """
     player_id: str
-    player_name: str
-    predicted_points: float
-    confidence_low: float
-    confidence_high: float
-    features_used: Dict[str, float]
+    player_name: Optional[str]
+    predicted_points: Optional[float] = None
+    confidence_low: Optional[float] = None
+    confidence_high: Optional[float] = None
+    features_used: Dict[str, object] = field(default_factory=dict)
+    status: str = 'ok'
+    reason: Optional[str] = None
+    message: Optional[str] = None
+
+
+# Reasons a requested player can't be predicted
+UNAVAILABLE_MESSAGES = {
+    'unknown_player': 'Player not found in the database.',
+    'position_mismatch': 'Player does not play the requested position.',
+    'unsupported_position': 'No model is trained for this position.',
+    'no_history': 'No games played before this week, so there is no history to predict from.',
+    'features_unavailable': 'Features could not be computed for this player.',
+}
+
+BOOL_FEATURES = ('is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5')
+
+
+def _to_float(value) -> Optional[float]:
+    """Convert DB values (Decimal, str, None, NaN) to a JSON-safe float or None."""
+    number = pd.to_numeric(value, errors='coerce')
+    return None if pd.isna(number) else float(number)
+
+
+def has_history(features: Dict) -> bool:
+    """
+    Whether a feature row is based on at least one prior game.
+
+    games_played_prior is authoritative when present; rows computed before it
+    existed (NULL) fall back to whether any rolling average was computed.
+    """
+    games = _to_float(features.get('games_played_prior'))
+    if games is not None:
+        return games > 0
+    return _to_float(features.get('fantasy_pts_avg_3')) is not None
+
+
+def trend_label(slope) -> Optional[str]:
+    """Describe a fantasy-points trend slope; None when there is no trend data."""
+    slope = _to_float(slope)
+    if slope is None:
+        return None
+    if slope > 0:
+        return 'improving'
+    if slope < 0:
+        return 'declining'
+    return 'flat'
 
 
 class WeeklyPredictor:
@@ -137,8 +187,14 @@ class WeeklyPredictor:
         """
         self.db_connection = db_connection
         self.models: Dict[str, XGBRegressor] = {}
-        self.quantile_models: Dict[str, Dict[str, GradientBoostingRegressor]] = {}
+        self.quantile_models: Dict[str, Dict[str, object]] = {}
         self.training_metrics: Dict[str, Dict] = {}
+        # Exact training columns per position, saved with the model so inference
+        # can't drift from training if the class feature lists change
+        self.feature_columns: Dict[str, List[str]] = {}
+        # 'nan': missing values stay NaN (models handle them natively).
+        # 'zero': legacy pickles trained with fillna(0); kept for compatibility.
+        self.missing_strategy = 'nan'
         self._is_trained = False
 
     def get_features_for_position(self, position: str) -> List[str]:
@@ -204,26 +260,36 @@ class WeeklyPredictor:
         feature_cols = self.get_features_for_position(position)
         available_features = [f for f in feature_cols if f in df.columns]
 
-        X = df[available_features].copy()
+        X = self._coerce_features(df, available_features)
         y = df['actual_points'].copy()
         meta = df[['season', 'week']].copy()
-
-        # Convert all columns to numeric (handles object types from PostgreSQL)
-        for col in X.columns:
-            X[col] = pd.to_numeric(X[col], errors='coerce')
-
-        # Fill missing values
-        X = X.fillna(0)
-
-        # Convert boolean to int
-        for bool_col in ['is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5']:
-            if bool_col in X.columns:
-                X[bool_col] = X[bool_col].astype(int)
 
         # Ensure target is numeric
         y = pd.to_numeric(y, errors='coerce').fillna(0)
 
         return X, y, meta
+
+    def _coerce_features(self, df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+        """
+        Select columns as floats. Missing columns/values become NaN, unless this
+        is a legacy model trained with zero-filling.
+        """
+        X = pd.DataFrame(index=df.index)
+        for col in columns:
+            # Booleans and Decimals from PostgreSQL arrive as object dtype
+            values = df[col] if col in df.columns else pd.Series(np.nan, index=df.index)
+            if col in BOOL_FEATURES:
+                values = values.map(lambda v: np.nan if v is None or pd.isna(v) else float(bool(v)))
+            X[col] = pd.to_numeric(values, errors='coerce').astype(float)
+
+        if self.missing_strategy == 'zero':
+            X = X.fillna(0)
+        return X
+
+    def _prepare_features(self, position: str, features: pd.DataFrame) -> pd.DataFrame:
+        """Build the model input matrix with exactly the columns used in training."""
+        columns = self.feature_columns.get(position) or self.get_features_for_position(position)
+        return self._coerce_features(features, columns)
 
     def _temporal_train_test_split(
         self, X: pd.DataFrame, y: pd.Series, meta: pd.DataFrame, test_ratio: float = 0.2
@@ -246,7 +312,7 @@ class WeeklyPredictor:
             test_keys.assign(_is_test=True),
             on=['season', 'week'],
             how='left'
-        )['_is_test'].fillna(False)
+        )['_is_test'].notna()
         train_mask = ~test_index.astype(bool)
         test_mask = test_index.astype(bool)
 
@@ -287,29 +353,32 @@ class WeeklyPredictor:
         )
         model.fit(X_train, y_train)
         self.models[position] = model
+        self.feature_columns[position] = list(X.columns)
 
         # Train quantile models for confidence intervals
         self.quantile_models[position] = {}
 
-        # Lower bound (10th percentile)
-        lower_model = GradientBoostingRegressor(
+        # Lower bound (10th percentile). HistGradientBoosting handles NaN natively.
+        lower_model = HistGradientBoostingRegressor(
             loss='quantile',
-            alpha=0.10,
-            n_estimators=100,
+            quantile=0.10,
+            max_iter=100,
             max_depth=3,
             learning_rate=0.1,
+            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
             random_state=42
         )
         lower_model.fit(X_train, y_train)
         self.quantile_models[position]['lower'] = lower_model
 
         # Upper bound (90th percentile)
-        upper_model = GradientBoostingRegressor(
+        upper_model = HistGradientBoostingRegressor(
             loss='quantile',
-            alpha=0.90,
-            n_estimators=100,
+            quantile=0.90,
+            max_iter=100,
             max_depth=3,
             learning_rate=0.1,
+            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
             random_state=42
         )
         upper_model.fit(X_train, y_train)
@@ -367,30 +436,7 @@ class WeeklyPredictor:
         if position not in self.models:
             raise RuntimeError(f"No model trained for position: {position}")
 
-        # Ensure correct features
-        model_features = self.get_features_for_position(position)
-        X = features.copy()
-
-        # Add missing features as 0
-        for col in model_features:
-            if col not in X.columns:
-                X[col] = 0
-
-        # Select only needed features in correct order
-        available = [f for f in model_features if f in X.columns]
-        X = X[available]
-
-        # Convert all columns to numeric (handles object types from PostgreSQL)
-        for col in X.columns:
-            X[col] = pd.to_numeric(X[col], errors='coerce')
-
-        X = X.fillna(0)
-
-        # Convert boolean
-        for bool_col in ['is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5']:
-            if bool_col in X.columns:
-                X[bool_col] = X[bool_col].astype(int)
-
+        X = self._prepare_features(position, features)
         return self.models[position].predict(X)
 
     def predict_with_confidence(self, position: str, features: pd.DataFrame) -> List[Dict]:
@@ -408,26 +454,7 @@ class WeeklyPredictor:
         if position not in self.models:
             raise RuntimeError(f"No model trained for position: {position}")
 
-        # Prepare features
-        model_features = self.get_features_for_position(position)
-        X = features.copy()
-
-        for col in model_features:
-            if col not in X.columns:
-                X[col] = 0
-
-        available = [f for f in model_features if f in X.columns]
-        X = X[available]
-
-        # Convert all columns to numeric (handles object types from PostgreSQL)
-        for col in X.columns:
-            X[col] = pd.to_numeric(X[col], errors='coerce')
-
-        X = X.fillna(0)
-
-        for bool_col in ['is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5']:
-            if bool_col in X.columns:
-                X[bool_col] = X[bool_col].astype(int)
+        X = self._prepare_features(position, features)
 
         # Get predictions
         predictions = self.models[position].predict(X)
@@ -436,151 +463,203 @@ class WeeklyPredictor:
 
         results = []
         for i in range(len(predictions)):
+            point = float(predictions[i])
+            # Bounds come from separate models and can cross the point estimate;
+            # widen them so the range always contains the prediction.
+            low = min(float(lower_bounds[i]), point)
+            high = max(float(upper_bounds[i]), point)
             results.append({
-                'predicted_points': float(predictions[i]),
-                'confidence_low': float(max(0, lower_bounds[i])),  # Can't be negative
-                'confidence_high': float(upper_bounds[i]),
+                'predicted_points': point,
+                'confidence_low': max(0.0, low),  # Can't be negative
+                'confidence_high': high,
             })
 
         return results
 
-    def get_player_features(self, player_ids: List[str], season: int, week: int) -> pd.DataFrame:
+    def _get_player_metadata(self, player_ids: List[str]) -> Dict[str, Dict[str, Optional[str]]]:
+        """Map player_id -> {player_name, position, team} for requested players."""
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id, full_name, position, team
+            FROM players
+            WHERE player_id IN ({placeholders})
+        """, player_ids)
+        return {
+            row[0]: {'player_name': row[1], 'position': row[2], 'team': row[3]}
+            for row in cursor.fetchall()
+        }
+
+    def get_player_features(self, player_ids: List[str], season: int, week: int,
+                            metadata: Optional[Dict] = None) -> pd.DataFrame:
         """
-        Get computed features for players from database.
+        Get features for players: stored rows first, computed on demand for
+        any requested player without a stored row.
 
         Args:
             player_ids: List of player IDs
             season: NFL season year
-            week: Week number to predict FOR
+            week: Week number to predict FOR (features use data from weeks < week)
+            metadata: Optional output of _get_player_metadata (fetched if omitted)
 
         Returns:
-            DataFrame with features for each player
+            DataFrame with one row per player that has features
         """
         if not self.db_connection:
             raise RuntimeError("Database connection required")
+        if not player_ids:
+            return pd.DataFrame()
 
         cursor = self.db_connection.cursor()
-
-        # Get features for the specified week
-        # These features were computed using data from weeks < week
         placeholders = ','.join(['%s'] * len(player_ids))
-        query = f"""
-            SELECT
-                pf.*,
-                p.full_name as player_name,
-                p.position
+        cursor.execute(f"""
+            SELECT pf.*
             FROM player_features pf
-            JOIN players p ON pf.player_id = p.player_id
             WHERE pf.player_id IN ({placeholders})
                 AND pf.season = %s
                 AND pf.week = %s
-        """
-
-        cursor.execute(query, (*player_ids, season, week))
+        """, (*player_ids, season, week))
         columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
+        stored = pd.DataFrame(cursor.fetchall(), columns=columns)
 
-        if not rows:
-            # Features not yet computed - compute on the fly
-            logger.warning(f"No pre-computed features for week {week}, computing on demand")
-            return self._compute_features_on_demand(player_ids, season, week)
+        if metadata is None:
+            metadata = self._get_player_metadata(player_ids)
+        stored_ids = set(stored['player_id']) if not stored.empty else set()
+        missing = [pid for pid in player_ids if pid in metadata and pid not in stored_ids]
 
-        return pd.DataFrame(rows, columns=columns)
+        frames = [stored] if not stored.empty else []
+        if missing:
+            logger.info(f"Computing features on demand for {len(missing)} players (week {week})")
+            computed = self._compute_features_on_demand(missing, season, week, metadata)
+            if not computed.empty:
+                frames.append(computed)
 
-    def _compute_features_on_demand(self, player_ids: List[str], season: int, week: int) -> pd.DataFrame:
-        """Compute features on demand if not pre-computed."""
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def _compute_features_on_demand(self, player_ids: List[str], season: int, week: int,
+                                    metadata: Dict) -> pd.DataFrame:
+        """Compute features for players without stored rows. Failures are skipped."""
         try:
             from data_pipeline.features.feature_engineer import FeatureEngineer
-
-            engineer = FeatureEngineer(self.db_connection)
-
-            all_features = []
-            for player_id in player_ids:
-                features = engineer.compute_player_features(player_id, season, week)
-                all_features.append(features)
-            features_df = pd.DataFrame(all_features)
-            metadata = self._get_player_metadata(player_ids)
-            return features_df.merge(metadata, on='player_id', how='left')
         except ImportError:
             logger.error("Feature engineer not available for on-demand computation")
             return pd.DataFrame()
 
-    def _get_player_metadata(self, player_ids: List[str]) -> pd.DataFrame:
-        """Fetch player metadata required by prediction output and grouping."""
-        placeholders = ','.join(['%s'] * len(player_ids))
-        query = f"""
-            SELECT player_id, full_name as player_name, position
-            FROM players
-            WHERE player_id IN ({placeholders})
-        """
+        engineer = FeatureEngineer(self.db_connection)
+        rows = []
+        for player_id in player_ids:
+            try:
+                matchup = self._get_matchup(metadata[player_id].get('team'), season, week)
+                rows.append(engineer.compute_player_features(player_id, season, week, matchup))
+            except Exception as e:
+                # Reads only, but a failed statement aborts the transaction
+                self.db_connection.rollback()
+                logger.warning(f"On-demand features failed for {player_id}: {e}")
+        return pd.DataFrame(rows)
+
+    def _get_matchup(self, team: Optional[str], season: int, week: int) -> Dict:
+        """Look up the team's opponent/home status for the week, if synced."""
+        if not team:
+            return {}
         cursor = self.db_connection.cursor()
-        cursor.execute(query, player_ids)
-        columns = [desc[0] for desc in cursor.description]
-        return pd.DataFrame(cursor.fetchall(), columns=columns)
+        cursor.execute("""
+            SELECT opponent, is_home FROM team_weekly_matchups
+            WHERE team = %s AND season = %s AND week = %s
+        """, (team, season, week))
+        row = cursor.fetchone()
+        return {'opponent': row[0], 'is_home': row[1]} if row else {}
+
+    @staticmethod
+    def _unavailable(player_id: str, player_name: Optional[str], reason: str) -> WeeklyPrediction:
+        return WeeklyPrediction(
+            player_id=player_id,
+            player_name=player_name,
+            status='unavailable',
+            reason=reason,
+            message=UNAVAILABLE_MESSAGES[reason],
+        )
+
+    @staticmethod
+    def _feature_summary(row: Dict) -> Dict[str, object]:
+        """JSON-safe explanation fields; None means 'no data', never a fake 0."""
+        return {
+            'avg_3_games': _to_float(row.get('fantasy_pts_avg_3')),
+            'avg_5_games': _to_float(row.get('fantasy_pts_avg_5')),
+            'trend': trend_label(row.get('fantasy_pts_trend_3')),
+            'opponent_rank': _to_float(row.get('opp_position_rank')),
+            'boom_rate': _to_float(row.get('boom_rate_5')),
+            'games_played_prior': _to_float(row.get('games_played_prior')),
+        }
 
     def predict_week(self, player_ids: List[str], season: int, week: int,
                      position: str = None) -> List[WeeklyPrediction]:
         """
-        Predict fantasy points for players in upcoming week.
+        Predict fantasy points for players in an upcoming week.
+
+        Returns exactly one WeeklyPrediction per distinct requested player:
+        predictions first (highest points first), then unavailable players
+        in request order, each with a reason.
 
         Args:
             player_ids: List of player IDs to predict
             season: NFL season
             week: Week to predict FOR
-            position: Position filter (optional)
-
-        Returns:
-            List of WeeklyPrediction objects
+            position: Required position (optional); other positions are unavailable
         """
-        # Get features from database
-        features_df = self.get_player_features(player_ids, season, week)
-
-        if features_df.empty:
-            logger.warning("No features available for prediction")
+        player_ids = list(dict.fromkeys(str(pid) for pid in player_ids))
+        if not player_ids:
             return []
 
-        results = []
+        metadata = self._get_player_metadata(player_ids)
+        features_df = self.get_player_features(player_ids, season, week, metadata)
+        features_by_id = {
+            str(row['player_id']): row
+            for row in features_df.to_dict('records')
+        } if not features_df.empty else {}
 
-        # Group by position and predict
-        for pos in features_df['position'].unique():
-            pos_lower = pos.lower()
-            if position and pos_lower != position.lower():
+        unavailable: List[WeeklyPrediction] = []
+        to_predict: Dict[str, List[str]] = {}
+
+        for pid in player_ids:
+            meta = metadata.get(pid)
+            if meta is None:
+                unavailable.append(self._unavailable(pid, None, 'unknown_player'))
                 continue
 
-            if pos_lower not in self.models:
-                logger.warning(f"No model for position {pos}, skipping")
-                continue
+            name = meta['player_name']
+            pos = (meta['position'] or '').lower()
+            features = features_by_id.get(pid)
 
-            pos_df = features_df[features_df['position'] == pos]
+            if position and pos != position.lower():
+                unavailable.append(self._unavailable(pid, name, 'position_mismatch'))
+            elif pos not in self.models:
+                unavailable.append(self._unavailable(pid, name, 'unsupported_position'))
+            elif features is None:
+                unavailable.append(self._unavailable(pid, name, 'features_unavailable'))
+            elif not has_history(features):
+                unavailable.append(self._unavailable(pid, name, 'no_history'))
+            else:
+                to_predict.setdefault(pos, []).append(pid)
 
-            # Get predictions with confidence
-            preds = self.predict_with_confidence(pos_lower, pos_df)
+        predicted: List[WeeklyPrediction] = []
+        for pos, ids in to_predict.items():
+            rows = [features_by_id[pid] for pid in ids]
+            preds = self.predict_with_confidence(pos, pd.DataFrame(rows))
 
-            for i, (_, row) in enumerate(pos_df.iterrows()):
-                pred = preds[i]
-
-                # Extract key features for explanation
-                feature_summary = {
-                    'avg_3_games': row.get('fantasy_pts_avg_3', 0),
-                    'avg_5_games': row.get('fantasy_pts_avg_5', 0),
-                    'trend': 'improving' if row.get('fantasy_pts_trend_3', 0) > 0 else 'declining',
-                    'opponent_rank': row.get('opp_position_rank'),
-                    'boom_rate': row.get('boom_rate_5', 0),
-                }
-
-                results.append(WeeklyPrediction(
-                    player_id=row['player_id'],
-                    player_name=row.get('player_name', f"Player {row['player_id']}"),
+            for pid, row, pred in zip(ids, rows, preds):
+                predicted.append(WeeklyPrediction(
+                    player_id=pid,
+                    player_name=metadata[pid]['player_name'],
                     predicted_points=round(pred['predicted_points'], 1),
                     confidence_low=round(pred['confidence_low'], 1),
                     confidence_high=round(pred['confidence_high'], 1),
-                    features_used=feature_summary
+                    features_used=self._feature_summary(row),
                 ))
 
-        # Sort by predicted points
-        results.sort(key=lambda x: x.predicted_points, reverse=True)
-
-        return results
+        predicted.sort(key=lambda p: p.predicted_points, reverse=True)
+        return predicted + unavailable
 
     def save(self, filepath: str) -> None:
         """Save trained models to disk."""
@@ -591,6 +670,8 @@ class WeeklyPredictor:
             'models': self.models,
             'quantile_models': self.quantile_models,
             'training_metrics': self.training_metrics,
+            'feature_columns': self.feature_columns,
+            'missing_strategy': self.missing_strategy,
         }
 
         os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
@@ -610,6 +691,9 @@ class WeeklyPredictor:
         predictor.models = model_data['models']
         predictor.quantile_models = model_data['quantile_models']
         predictor.training_metrics = model_data['training_metrics']
+        predictor.feature_columns = model_data.get('feature_columns', {})
+        # Pickles saved before missing_strategy existed were trained on fillna(0)
+        predictor.missing_strategy = model_data.get('missing_strategy', 'zero')
         predictor._is_trained = True
 
         logger.info(f"Weekly predictor loaded from {filepath}")
@@ -639,7 +723,7 @@ class WeeklyPredictor:
                 train_keys.assign(_keep=True),
                 on=['season', 'week'],
                 how='left'
-            )['_keep'].fillna(False).astype(bool)
+            )['_keep'].notna()
             test_mask = (
                 (meta['season'] == test_key['season']) &
                 (meta['week'] == test_key['week'])
@@ -777,9 +861,12 @@ if __name__ == '__main__':
 
             print(f"\nWeek {week} {position.upper()} Predictions:")
             print("-" * 60)
-            for pred in predictions[:20]:
+            for pred in [p for p in predictions if p.status == 'ok'][:20]:
                 print(f"{pred.player_name:25} {pred.predicted_points:5.1f} pts "
                       f"({pred.confidence_low:.1f}-{pred.confidence_high:.1f})")
+            skipped = [p for p in predictions if p.status != 'ok']
+            if skipped:
+                print(f"\n{len(skipped)} players unavailable (e.g. {skipped[0].reason})")
 
             conn.close()
 
