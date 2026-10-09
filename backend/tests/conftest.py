@@ -16,6 +16,10 @@ from typing import Dict, Any, Generator
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Single-threaded model fits: tests use tiny data, where thread start-up dominates
+os.environ.setdefault("PREDICTOR_N_JOBS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")  # sklearn HistGradientBoosting (OpenMP)
+
 
 # =============================================================================
 # Sample Data Fixtures

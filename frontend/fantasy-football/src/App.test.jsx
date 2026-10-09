@@ -1,14 +1,15 @@
+import { vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from './App';
 import * as api from './lib/api';
 
-jest.mock('./lib/api', () => ({
-  getModelStatus: jest.fn(),
-  getSeasons: jest.fn(),
-  getWeeks: jest.fn(),
-  searchPlayers: jest.fn(),
-  predictWeek: jest.fn(),
+vi.mock('./lib/api', () => ({
+  getModelStatus: vi.fn(),
+  getSeasons: vi.fn(),
+  getWeeks: vi.fn(),
+  searchPlayers: vi.fn(),
+  predictWeek: vi.fn(),
   isCancel: (error) => error?.name === 'CanceledError',
   errorMessage: (error, fallback) => error?.response?.data?.error || fallback,
 }));
@@ -42,7 +43,6 @@ const response = (predictions, extra = {}) => ({
 });
 
 beforeEach(() => {
-  jest.clearAllMocks();
   api.getModelStatus.mockResolvedValue({ weekly_predictor_available: true });
   api.getSeasons.mockResolvedValue({ seasons: [2025, 2024], default: 2025 });
   api.getWeeks.mockResolvedValue([{ week: 6, players: 500 }, { week: 7, players: 510 }]);
@@ -56,11 +56,11 @@ async function renderReady() {
   await screen.findByRole('button', { name: 'Compare week 7' });
 }
 
-async function selectPlayer(name) {
+async function selectPlayer(user, name) {
   // Pick into the first empty slot, like a user would
   const [emptySlot] = await screen.findAllByRole('combobox', { name: /search for a player/i });
-  userEvent.click(emptySlot);
-  userEvent.click(await screen.findByRole('option', { name: new RegExp(name, 'i') }));
+  await user.click(emptySlot);
+  await user.click(await screen.findByRole('option', { name: new RegExp(name, 'i') }));
   await waitFor(() => expect(screen.queryByRole('option')).not.toBeInTheDocument());
   // Radix returns focus to the trigger on close; in jsdom that lands a tick later,
   // and opening another popover before it does would immediately dismiss it.
@@ -71,16 +71,18 @@ async function selectPlayer(name) {
 const predictButton = () => screen.getByRole('button', { name: /^compare week/i });
 
 test('uses the season and latest week from the backend', async () => {
+  const user = userEvent.setup();
   await renderReady();
 
   expect(api.getWeeks).toHaveBeenCalledWith(2025, expect.anything());
 });
 
 test('player search runs on the server for the selected week', async () => {
+  const user = userEvent.setup();
   await renderReady();
 
-  userEvent.click(screen.getByRole('combobox', { name: /search for a player/i }));
-  userEvent.type(await screen.findByPlaceholderText(/search by name or team/i), 'bij');
+  await user.click(screen.getByRole('combobox', { name: /search for a player/i }));
+  await user.type(await screen.findByPlaceholderText(/search by name or team/i), 'bij');
 
   await screen.findByRole('option', { name: /bijan robinson/i });
   await waitFor(() =>
@@ -93,11 +95,12 @@ test('player search runs on the server for the selected week', async () => {
 });
 
 test('results keep their own labels and are flagged stale when inputs change', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockResolvedValue(response([prediction(PLAYERS[0], 19.6)]));
   await renderReady();
 
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
 
   expect(await screen.findByRole('heading', { name: 'Derrick Henry projects 19.6 points' })).toBeInTheDocument();
   expect(screen.getByText('Week 7, 2025')).toBeInTheDocument();
@@ -110,8 +113,8 @@ test('results keep their own labels and are flagged stale when inputs change', a
     name: 'Derrick Henry: 19.6 projected PPR points, 80% range 11.6 to 27.6, at CIN, Sleeper projection',
   })).toBeInTheDocument();
 
-  userEvent.click(screen.getByRole('button', { name: /add player/i }));
-  await selectPlayer('Bijan Robinson');
+  await user.click(screen.getByRole('button', { name: /add player/i }));
+  await selectPlayer(user, 'Bijan Robinson');
 
   const banner = await screen.findByRole('status');
   expect(banner).toHaveTextContent('These results are for your previous selection (Week 7).');
@@ -121,6 +124,7 @@ test('results keep their own labels and are flagged stale when inputs change', a
 });
 
 test('changing inputs cancels a pending prediction and ignores its answer', async () => {
+  const user = userEvent.setup();
   let pendingSignal;
   api.predictWeek.mockImplementation((request, signal) => {
     pendingSignal = signal;
@@ -130,12 +134,12 @@ test('changing inputs cancels a pending prediction and ignores its answer', asyn
   });
   await renderReady();
 
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
   await screen.findByRole('heading', { name: 'Comparing week 7...' });
 
-  userEvent.click(screen.getByRole('button', { name: /add player/i }));
-  await selectPlayer('Bijan Robinson');
+  await user.click(screen.getByRole('button', { name: /add player/i }));
+  await selectPlayer(user, 'Bijan Robinson');
 
   await waitFor(() => expect(pendingSignal.aborted).toBe(true));
   expect(screen.queryByText(/comparing week/i)).not.toBeInTheDocument();
@@ -144,6 +148,7 @@ test('changing inputs cancels a pending prediction and ignores its answer', asyn
 });
 
 test('shows unavailable players with their reason', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockResolvedValue(response([prediction(PLAYERS[0], 19.6)], {
     unavailable: [
       { player_id: '9509', player_name: 'Bijan Robinson', reason: 'no_history',
@@ -153,8 +158,8 @@ test('shows unavailable players with their reason', async () => {
   }));
   await renderReady();
 
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
 
   const notProjected = (await screen.findByRole('heading', { name: 'Not projected' })).closest('div');
   expect(within(notProjected).getByText('Bijan Robinson')).toBeInTheDocument();
@@ -163,16 +168,18 @@ test('shows unavailable players with their reason', async () => {
 });
 
 test('shows the API error message when prediction fails', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockRejectedValue({ response: { data: { error: 'Weekly predictor not available' } } });
   await renderReady();
 
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
 
   expect(await screen.findByRole('alert')).toHaveTextContent('Weekly predictor not available');
 });
 
 test('shows a setup error when the backend is unreachable', async () => {
+  const user = userEvent.setup();
   api.getSeasons.mockRejectedValue(new Error('Network Error'));
   render(<App />);
 
@@ -180,27 +187,29 @@ test('shows a setup error when the backend is unreachable', async () => {
 });
 
 test('names the decision: start the clear leader, or flag a close call', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockResolvedValueOnce(response([prediction(PLAYERS[1], 21.2), prediction(PLAYERS[0], 16.8)]));
   await renderReady();
-  await selectPlayer('Derrick Henry');
-  userEvent.click(screen.getByRole('button', { name: /add player/i }));
-  await selectPlayer('Bijan Robinson');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(screen.getByRole('button', { name: /add player/i }));
+  await selectPlayer(user, 'Bijan Robinson');
+  await user.click(predictButton());
 
   expect(await screen.findByRole('heading', { name: 'Start Bijan Robinson' })).toBeInTheDocument();
   expect(screen.getByText('Projects 4.4 more points than Derrick Henry.')).toBeInTheDocument();
 
   api.predictWeek.mockResolvedValueOnce(response([prediction(PLAYERS[1], 17.0), prediction(PLAYERS[0], 16.8)]));
-  userEvent.click(predictButton());
+  await user.click(predictButton());
   expect(await screen.findByRole('heading', { name: 'Close call: Bijan Robinson or Derrick Henry' }))
     .toBeInTheDocument();
 });
 
 test('shows injury status only when the result is for the current week, and says why', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockResolvedValue(response([prediction(PLAYERS[0], 19.6)]));
   await renderReady();
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
 
   await screen.findByRole('heading', { name: 'Derrick Henry projects 19.6 points' });
   expect(screen.queryByText('Questionable')).not.toBeInTheDocument();
@@ -210,23 +219,25 @@ test('shows injury status only when the result is for the current week, and says
 });
 
 test('shows the injury chip for the current week', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockResolvedValue(response([prediction(PLAYERS[0], 19.6)], {
     current_week: { season: 2025, week: 7 },
   }));
   await renderReady();
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
 
   expect(await screen.findByText('Questionable')).toBeInTheDocument();
 });
 
 test('the chart has a table view with the same values', async () => {
+  const user = userEvent.setup();
   api.predictWeek.mockResolvedValue(response([prediction(PLAYERS[0], 19.6)]));
   await renderReady();
-  await selectPlayer('Derrick Henry');
-  userEvent.click(predictButton());
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
 
-  userEvent.click(await screen.findByRole('button', { name: 'Show as table' }));
+  await user.click(await screen.findByRole('button', { name: 'Show as table' }));
 
   const row = await screen.findByRole('row', { name: /derrick henry/i });
   expect(within(row).getByText('19.6')).toBeInTheDocument();

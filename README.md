@@ -54,7 +54,7 @@ The backend serves a single weekly prediction system built on Postgres feature e
 ### Prerequisites
 
 - Python 3.11+ (the pinned NumPy and scikit-learn require it; CI uses 3.13)
-- Node.js 18+ (CI uses 22.12)
+- Node.js 22.12+ or 24+ (Vite 8 needs 20.19+, Vitest 5 needs 22.12+; CI uses 22.12)
 - Docker Desktop
 
 ### 1. Start the database
@@ -125,14 +125,16 @@ python app.py
 ```bash
 cd frontend/fantasy-football
 npm install
-npm start
+npm start          # Vite dev server on http://localhost:3000
 ```
 
 The frontend calls `http://localhost:5001` by default. To point it elsewhere,
-set `REACT_APP_API_BASE` (e.g. in `frontend/fantasy-football/.env.local`).
-The season and weeks shown come from the data the backend has.
+set `VITE_API_BASE` (e.g. in `frontend/fantasy-football/.env.local`;
+`REACT_APP_API_BASE` still works). The season and weeks shown come from the
+data the backend has.
 
-Frontend tests: `CI=true npm test`.
+Frontend tests: `npm test` (Vitest). Production build: `npm run build`
+(output in `build/`), preview it with `npm run preview`.
 
 ### 7. Open the app
 
@@ -378,10 +380,11 @@ football/
 
 ### Frontend
 
-- React 18
-- Tailwind CSS
-- shadcn/ui
+- React 18 + Vite
+- Tailwind CSS 3
+- shadcn/ui (Radix, cmdk)
 - Axios
+- Vitest + Testing Library
 
 ## License
 

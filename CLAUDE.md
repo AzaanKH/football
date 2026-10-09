@@ -45,18 +45,19 @@ football/
 │   ├── migrations/              001-004, applied manually to existing DBs
 │   ├── models/                  weekly_predictor.pkl (+ local backups; gitignored)
 │   └── tests/                   pytest: unit / integration / e2e
-├── frontend/fantasy-football/   Create React App, Tailwind 3, shadcn/ui (Radix, cmdk)
+├── frontend/fantasy-football/   React 18 + Vite, Tailwind 3, shadcn/ui (Radix, cmdk)
+│   ├── index.html, vite.config.mjs  Entry page; Vite + Vitest config
 │   └── src/
-│       ├── App.js               Page, state, request lifecycle
-│       ├── lib/api.js           All HTTP calls (base URL: REACT_APP_API_BASE)
+│       ├── main.jsx             Entry point
+│       ├── App.jsx              Page, state, request lifecycle
+│       ├── lib/api.js           All HTTP calls (base URL: VITE_API_BASE)
 │       ├── lib/predictionState.js  Request identity / stale-result logic
 │       └── components/range-field.jsx  The yard-line range chart
 └── .claude/skills/frontend-design/  Design skill (use for UI work)
 ```
 
-Legacy, unused files still in `backend/`: `convert_to_csv_from_*.py`,
-`player_data.py`, `player_names.py`, `old_data/`, `week_1..3/`, `rankings/`,
-`*_rankings_week_4.csv`. Don't build on them; they are slated for removal.
+Untracked local scripts may exist in `backend/` (e.g. `sync_historical.py`,
+`visualize_data.py`); they are personal tools, not part of the app.
 
 ## Commands
 
@@ -87,13 +88,19 @@ python run_tests.py e2e               # real Sleeper + football_test DB
 
 # Frontend
 cd football/frontend/fantasy-football
-npm start                             # :3000
-CI=true npm test
-npm run build
+npm start                             # Vite dev server, :3000
+npm test                              # Vitest (jsdom)
+npm run build                         # -> build/
+npm run preview
 ```
 
 Dependencies are pinned in `backend/requirements*.txt`
-(`requirements_test.txt` includes the others).
+(`requirements_test.txt` includes the others). Runtimes: Python 3.11+
+(pinned NumPy/scikit-learn), Node 22.12+ or 24+ (Vitest 5; `.nvmrc`).
+
+CI (`.github/workflows/ci.yml`) runs on every PR, stacked ones included:
+backend unit tests, frontend `npm ci`/test/build, and a fresh PostgreSQL
+built from `init_db.sql` with every migration re-applied on top.
 
 ## Architecture
 
@@ -155,6 +162,9 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
 - psycopg2 returns `Decimal`; convert (`_to_float`) before JSON or math.
 - Feature recompute is an upsert: after changing feature logic, rows it no
   longer produces stay stale; delete them (back up first).
+- Unit tests fit models single-threaded (`tests/conftest.py` sets
+  `PREDICTOR_N_JOBS=1`, `OMP_NUM_THREADS=1`): on tiny data, thread start-up
+  dominated and pushed tests past pytest's 60 s timeout on a busy machine.
 - Back up before destructive data operations
   (`pg_dump -t <table> -Fc` into `backend/backups/`, gitignored).
 
@@ -183,9 +193,13 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
   work.
 - cmdk v1 always renders `data-disabled="false"`: style disabled items with
   `data-[disabled=true]:`, not `data-[disabled]:`.
-- Jest maps `axios` to its CJS build (`package.json` -> `jest`). In jsdom,
-  Radix returns focus to a trigger a tick late, and React 18 renders state
-  updates asynchronously: `await` the next element (`findBy*`).
+- Tests use Vitest (config in `vite.config.mjs`: jsdom, `pool: 'threads'`
+  because forked workers time out on this Windows machine, `mockReset`).
+  Use `vi.mock`/`vi.fn` and user-event 14 (`const user = userEvent.setup()`,
+  `await user.click(...)`). In jsdom, Radix returns focus to a trigger a tick
+  late; `await` the next element (`findBy*`) before opening another popover.
+- Files containing JSX must use `.jsx` (Vite requirement). Env vars must be
+  prefixed `VITE_` (or `REACT_APP_`, kept for compatibility).
 
 **Environment**
 - In this Git Bash setup, heredocs containing apostrophes fail to parse; write
@@ -209,4 +223,6 @@ Key tables: `players`, `player_weekly_stats` (generated column `played`),
   played that week is never marked on bye; no opponent is shown instead).
 - Injury status is current-only; the UI shows it only for the current week.
 - QB range coverage is ~76% vs the 80% target (calibration drift).
-- Create React App is deprecated; migrating to Vite is planned.
+- `npm audit` reports 5 high findings, all from Tailwind 3's build-time
+  file watcher (`braces` via chokidar/fast-glob); fixing them needs the
+  Tailwind 4 migration. They don't ship in the built app.

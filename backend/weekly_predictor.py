@@ -79,6 +79,10 @@ POINT_SLEEPER = 'sleeper'                   # Sleeper projection as-is
 POINT_SLEEPER_CORRECTED = 'sleeper+model'   # Sleeper + learned correction
 POINT_MODEL = 'model'                       # standalone model (no projection)
 
+# XGBoost threads (-1 = all cores). Tests set 1: thread start-up dominates
+# on tiny data and made fits ~8x slower on a busy machine.
+N_JOBS = int(os.environ.get('PREDICTOR_N_JOBS', -1))
+
 
 def _to_float(value) -> Optional[float]:
     """Convert DB values (Decimal, str, None, NaN) to a JSON-safe float or None."""
@@ -368,7 +372,7 @@ class WeeklyPredictor:
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
-            n_jobs=-1
+            n_jobs=N_JOBS
         )
 
     @staticmethod
@@ -383,7 +387,7 @@ class WeeklyPredictor:
             subsample=0.8,
             colsample_bytree=0.8,
             random_state=42,
-            n_jobs=-1
+            n_jobs=N_JOBS
         )
 
     @staticmethod
