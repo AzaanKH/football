@@ -95,7 +95,12 @@ npm run preview
 ```
 
 Dependencies are pinned in `backend/requirements*.txt`
-(`requirements_test.txt` includes the others).
+(`requirements_test.txt` includes the others). Runtimes: Python 3.11+
+(pinned NumPy/scikit-learn), Node 22.12+ or 24+ (Vitest 5; `.nvmrc`).
+
+CI (`.github/workflows/ci.yml`) runs on every PR, stacked ones included:
+backend unit tests, frontend `npm ci`/test/build, and a fresh PostgreSQL
+built from `init_db.sql` with every migration re-applied on top.
 
 ## Architecture
 
@@ -118,9 +123,12 @@ Dependencies are pinned in `backend/requirements*.txt`
 ### Season calendar
 
 `data_pipeline/season.py` is the single source of truth: Sleeper's
-`/state/nfl`, else a date estimate (season opens the Thursday after Labor
-Day). A week is *finished* once its last kickoff (from the synced schedule)
-plus 4 hours has passed. Never hard-code a season; use `current_context()`.
+`/state/nfl`; else the synced schedule (current week = first week whose
+games haven't all finished); else a date estimate (season opens the
+Thursday after Labor Day; January belongs to the previous season, whose
+weeks 17-18 are played then). A week is *finished* once its last kickoff
+(from the synced schedule) plus 4 hours has passed. Never hard-code a
+season; use `current_context()`.
 
 ### Database
 
@@ -228,8 +236,12 @@ defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
   by the model: tested in `evaluation.py` (2025 W7 - 2026 W3) they did not
   beat Sleeper's projection for any position (Sleeper already prices in
   matchup and role), and for QB they made the correction worse.
-- For upcoming weeks, the opponent/bye comes from the player's *current*
-  team (`players.team`); finished weeks use the team they actually played for.
+- Opponent/bye use the player's team *as of the requested week*
+  (`WeeklyPredictor._get_week_teams`): the team they played for that week;
+  for a past week they missed, their nearest game before it (else after);
+  otherwise, as for upcoming weeks, the current team (`players.team`). A
+  trade between the last game and an upcoming week is only reflected once
+  the players sync picks it up.
 - Injury status is current-only; the UI shows it only for the current week.
 - Ranges are not floored at 0: PPR points go negative (kneel-downs,
   turnovers), and a 0 floor had pulled backup-QB coverage down (QB 75% ->

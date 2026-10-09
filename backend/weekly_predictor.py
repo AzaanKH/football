@@ -672,6 +672,49 @@ class WeeklyPredictor:
             for row in cursor.fetchall()
         }
 
+    def _get_played_ids(self, player_ids: List[str], season: int, week: int) -> set:
+        """
+        Players with a game played in (season, week): never on bye that week,
+        even when their team for it is unknown (stats synced before per-game
+        team was stored) and the current team had no game.
+        """
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id FROM player_weekly_stats
+            WHERE player_id IN ({placeholders})
+                AND season = %s AND week = %s AND played
+        """, (*player_ids, season, week))
+        return {row[0] for row in cursor.fetchall()}
+
+    def _get_week_teams(self, player_ids: List[str], season: int, week: int) -> Dict[str, str]:
+        """
+        The team each player was on in (season, week), from per-game stats:
+        the team they played for that week; for a past week without a game
+        (bye, inactive), their nearest game before it, else the nearest after.
+        Players with no game that week or later are left out, so the current
+        team (players.team) applies, as it should for upcoming weeks.
+        """
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id, week, team FROM player_weekly_stats
+            WHERE player_id IN ({placeholders})
+                AND season = %s AND team IS NOT NULL
+        """, (*player_ids, season))
+        games: Dict[str, Dict[int, str]] = {}
+        for player_id, game_week, team in cursor.fetchall():
+            games.setdefault(player_id, {})[game_week] = team
+
+        teams = {}
+        for player_id, by_week in games.items():
+            if week in by_week:
+                teams[player_id] = by_week[week]
+            elif any(w > week for w in by_week):
+                before = [w for w in by_week if w < week]
+                teams[player_id] = by_week[max(before) if before else min(by_week)]
+        return teams
+
     @staticmethod
     def _game_context(meta: Dict, schedule: Dict) -> Dict[str, object]:
         """Display context for a player: team, this week's game, injury status."""
@@ -827,7 +870,15 @@ class WeeklyPredictor:
             return []
 
         metadata = self._get_player_metadata(player_ids)
+        # Team as of the requested week, not today's (trades), for display,
+        # bye detection and on-demand features alike
+        week_teams = self._get_week_teams(list(metadata), season, week) if metadata else {}
+        metadata = {
+            pid: {**meta, 'team': week_teams.get(pid, meta.get('team'))}
+            for pid, meta in metadata.items()
+        }
         schedule = self._get_schedule(season, week)
+        played = self._get_played_ids(player_ids, season, week) if schedule else set()
         features_df = self.get_player_features(player_ids, season, week, metadata)
         if not features_df.empty:
             projections = self._get_projections(player_ids, season, week)
@@ -850,8 +901,10 @@ class WeeklyPredictor:
             pos = (meta['position'] or '').lower()
             features = features_by_id.get(pid)
             context = self._game_context(meta, schedule)
-            # Only infer a bye when the week's schedule is known
-            on_bye = bool(schedule) and meta.get('team') and meta['team'] not in schedule
+            # Only infer a bye when the week's schedule is known, and never
+            # for a player who played that week (they may have changed teams)
+            on_bye = (bool(schedule) and meta.get('team') and meta['team'] not in schedule
+                      and pid not in played)
 
             reason = None
             if position and pos != position.lower():
