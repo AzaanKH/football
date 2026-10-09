@@ -42,10 +42,21 @@ export function InjuryChip({ status }) {
   );
 }
 
-/** Axis max: the widest range rounded up to the next 5, at least 20 points. */
-function scaleMax(predictions) {
+/**
+ * Axis domain: 0 (or the lowest range, rounded down to 5, when a range goes
+ * negative: PPR points can) to the widest range rounded up to 5, at least 20.
+ */
+export function scaleDomain(predictions) {
+  const lowest = Math.min(0, ...predictions.map((p) => p.confidenceLow));
   const widest = Math.max(20, ...predictions.map((p) => p.confidenceHigh));
-  return Math.ceil(widest / 5) * 5;
+  return { min: Math.floor(lowest / 5) * 5, max: Math.ceil(widest / 5) * 5 };
+}
+
+/** Multiples of `step` within [min, max]. */
+function stepsBetween(min, max, step) {
+  const values = [];
+  for (let value = Math.ceil(min / step) * step; value <= max; value += step) values.push(value);
+  return values;
 }
 
 function rowDescription(p) {
@@ -60,15 +71,13 @@ function rowDescription(p) {
   return parts.join(', ');
 }
 
-function YardLines({ max }) {
-  const ticks = [];
-  for (let value = 0; value <= max; value += 5) ticks.push(value);
-  return ticks.map((value) => (
+function YardLines({ min, max }) {
+  return stepsBetween(min, max, 5).map((value) => (
     <span
       key={value}
       aria-hidden="true"
       className="absolute inset-y-0 w-px bg-yardline"
-      style={{ left: `${(value / max) * 100}%` }}
+      style={{ left: `${((value - min) / (max - min)) * 100}%` }}
     />
   ));
 }
@@ -101,11 +110,9 @@ function PlayerLine({ p, showInjury }) {
 export function RangeField({ predictions, showInjuries = false, animationKey }) {
   const [active, setActive] = useState(null);
   const [asTable, setAsTable] = useState(false);
-  const max = scaleMax(predictions);
-  const pct = (value) => `${Math.min(100, Math.max(0, (value / max) * 100))}%`;
-
-  const ticks = [];
-  for (let value = 0; value <= max; value += 10) ticks.push(value);
+  const { min, max } = scaleDomain(predictions);
+  const pct = (value) => `${Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100))}%`;
+  const ticks = stepsBetween(min, max, 10);
 
   return (
     <section aria-labelledby="range-field-title" className="@container">
@@ -201,7 +208,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
 
                   {/* The range on the field */}
                   <div aria-hidden="true" className="relative h-8">
-                    <YardLines max={max} />
+                    <YardLines min={min} max={max} />
                     <span
                       className="range-in absolute top-1/2 h-2.5 -translate-y-1/2 rounded-[4px] bg-scrimmage/35"
                       style={{ left: pct(p.confidenceLow), width: `calc(${pct(p.confidenceHigh)} - ${pct(p.confidenceLow)})` }}
