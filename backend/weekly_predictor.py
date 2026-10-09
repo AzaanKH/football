@@ -1096,7 +1096,11 @@ if __name__ == '__main__':
 
         week = int(sys.argv[2])
         position = sys.argv[3]
-        season = int(sys.argv[4]) if len(sys.argv) > 4 else 2024
+        if len(sys.argv) > 4:
+            season = int(sys.argv[4])
+        else:
+            from data_pipeline.season import current_context
+            season = current_context().season
 
         try:
             conn = get_db_connection()

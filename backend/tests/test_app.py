@@ -157,7 +157,7 @@ class TestPlayerSearchAndSeasons:
     def test_seasons_falls_back_when_no_data(self, client, pool):
         pool.conn.cursor.return_value.fetchall.return_value = []
 
-        assert client.get('/seasons').get_json()['default'] == api.DEFAULT_SEASON
+        assert client.get('/seasons').get_json()['default'] == CURRENT_WEEK['season']
 
 
 class TestDatabaseAvailability:

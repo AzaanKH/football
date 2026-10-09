@@ -17,7 +17,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.environ.get('MODEL_PATH', 'models/weekly_predictor.pkl')
-DEFAULT_SEASON = int(os.environ.get('DEFAULT_SEASON', 2025))
+# Optional override; otherwise the current NFL season (see default_season)
+DEFAULT_SEASON_OVERRIDE = os.environ.get('DEFAULT_SEASON')
 
 # Positions the API accepts (TE is listed; predictions explain it has no model)
 POSITIONS = {'qb', 'rb', 'wr', 'te'}
@@ -128,7 +129,9 @@ def _int_param(value, name: str, minimum: int, maximum: int, default=None) -> in
 
 
 def _season_param(value) -> int:
-    return _int_param(value, 'season', 1999, 2100, default=DEFAULT_SEASON)
+    if value is None or value == '':
+        return default_season()
+    return _int_param(value, 'season', 1999, 2100)
 
 
 def _position_param(value, required: bool) -> str:
@@ -228,6 +231,17 @@ def current_nfl_week():
         return value
 
 
+def default_season() -> int:
+    """DEFAULT_SEASON if set, else the current NFL season (Sleeper, then the calendar)."""
+    if DEFAULT_SEASON_OVERRIDE:
+        return int(DEFAULT_SEASON_OVERRIDE)
+    current = current_nfl_week()
+    if current:
+        return current['season']
+    from data_pipeline.season import estimate_state
+    return estimate_state(datetime.now(timezone.utc).date())['season']
+
+
 def _utc_iso(value):
     """Naive UTC timestamps (DB) or POSIX times -> ISO 8601 with Z, or None."""
     if value is None:
@@ -307,7 +321,7 @@ def model_status():
         'weekly_predictor_available': predictor is not None and postgres_available,
         'postgres_available': postgres_available,
         'model': model_store.status(),
-        'default_season': DEFAULT_SEASON,
+        'default_season': default_season(),
     }
 
     if predictor is not None:
@@ -393,7 +407,7 @@ def predict_week():
         position: 'qb', 'rb', 'wr' or 'te'
         player_ids: List of player IDs to predict (max 50)
         week: Week number to predict FOR (1-22)
-        season: NFL season (default: DEFAULT_SEASON)
+        season: NFL season (default: current NFL season)
 
     Returns:
         {week, season, position,
@@ -464,7 +478,7 @@ def seasons():
 
     Returns:
         {seasons: [2025, 2024, ...], default: <newest season with data>}
-        default falls back to DEFAULT_SEASON when no features exist yet.
+        default falls back to the current NFL season when no features exist yet.
     """
     with db_connection() as conn:
         cursor = conn.cursor()
@@ -473,7 +487,7 @@ def seasons():
 
     return jsonify({
         'seasons': available,
-        'default': available[0] if available else DEFAULT_SEASON,
+        'default': available[0] if available else default_season(),
         'current_week': current_nfl_week(),
     })
 
@@ -484,7 +498,7 @@ def available_weeks():
     Get weeks that have computed features available for predictions.
 
     Query params:
-        season: NFL season (default: DEFAULT_SEASON)
+        season: NFL season (default: current NFL season)
 
     Returns:
         List of weeks with feature data
@@ -511,7 +525,7 @@ def get_player_features(player_id):
     Get computed features for a specific player.
 
     Query params:
-        season: NFL season (default: DEFAULT_SEASON)
+        season: NFL season (default: current NFL season)
         week: Specific week (optional, returns latest if not specified)
 
     Returns:

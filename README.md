@@ -98,12 +98,20 @@ Get-Content .\migrations\004_add_played_flag.sql | docker exec -i football-db ps
 After applying `004`, recompute features (`python run_pipeline.py compute-all-features`)
 and retrain: features and training now ignore weeks a player didn't play.
 
-### 4. Run initial setup
+### 4. Catch up to the current season
 
 ```bash
 cd backend
-python setup_2025_season.py
+python setup_season.py --dry-run   # show what's missing
+python setup_season.py             # sync it, compute features, retrain
 ```
+
+`setup_season.py` reads the current NFL season and week from Sleeper (falling
+back to the calendar) and syncs only what is missing for the current season
+plus three previous ones: schedule, stats for finished weeks, Sleeper
+projections, then features and retraining. Re-run it any time; it is
+incremental. Options: `--history N`, `--season YYYY`, `--weeks 1-10`,
+`--force`, `--sync`, `--train`.
 
 ### 5. Start the backend API
 
@@ -176,14 +184,23 @@ python scheduler.py status
 
 `python scheduler.py start` requires `APScheduler` to be installed in the Python environment you are using.
 
+## Season Calendar
+
+Nothing is tied to a fixed season. `backend/data_pipeline/season.py` resolves
+where the NFL calendar is right now (Sleeper's state, or the date if Sleeper
+is unreachable: the regular season opens the Thursday after Labor Day):
+
+- `completed_weeks`: weeks with final stats. The current week counts as
+  finished once its last game is over (last kickoff in the synced schedule
+  plus four hours), so it flips Monday night, not on a fixed weekday.
+- `prediction_week`: the week being predicted; `None` in the offseason.
+
+The scheduler, `setup_season.py`, the API's default season and the predictor
+CLI all use it. Set `DEFAULT_SEASON` only to pin the API to a season.
+
 ## Offseason Behavior
 
-The weekly scheduler now distinguishes between:
-
-- `completed_week`: the latest finalized stat week
-- `prediction_week`: the upcoming week being prepared for prediction
-
-During the NFL offseason, Sleeper may return `week = 0`. In that case:
+During the NFL offseason (no prediction week):
 
 - player sync still runs
 - stats sync is skipped cleanly
@@ -337,7 +354,7 @@ football/
 │   ├── app.py
 │   ├── weekly_predictor.py
 │   ├── scheduler.py
-│   ├── setup_2025_season.py
+│   ├── setup_season.py
 │   ├── migrations/
 │   ├── data_pipeline/
 │   │   ├── sleeper_client.py
