@@ -147,3 +147,26 @@ class TestSchedulerUnit:
             result = scheduler.job_compute_features()
 
         assert result['skipped'] is True
+
+
+class TestSchedulerTimezone:
+    @pytest.mark.unit
+    def test_jobs_run_in_eastern_time_on_a_pacific_host(self):
+        """Explicit CronTriggers default to the host zone; every job must be Eastern."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo('America/New_York')
+        with patch('apscheduler.triggers.cron.get_localzone',
+                   return_value=ZoneInfo('America/Los_Angeles')):
+            jobs = scheduler.FantasyScheduler().scheduler.get_jobs()
+
+        assert len(jobs) == 7
+        for job in jobs:
+            assert str(job.trigger.timezone) == 'America/New_York', job.id
+
+        gameday = next(j for j in jobs if j.id == 'refresh_projections_gameday')
+        # Sunday morning, Oct 11 2026: the refresh must land before 1 PM ET kickoffs
+        now = datetime(2026, 10, 11, 9, 0, tzinfo=eastern)
+        fire = gameday.trigger.get_next_fire_time(None, now)
+        assert fire == datetime(2026, 10, 11, 11, 45, tzinfo=eastern)
