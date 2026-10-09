@@ -381,7 +381,7 @@ football/
 ### Frontend
 
 - React 18 + Vite
-- Tailwind CSS 3
+- Tailwind CSS 4
 - shadcn/ui (Radix, cmdk)
 - Axios
 - Vitest + Testing Library

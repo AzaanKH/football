@@ -239,7 +239,7 @@ const App = () => {
               onValueChange={(v) => setSeason(parseInt(v, 10))}
               disabled={!seasons.length}
             >
-              <SelectTrigger aria-label="Season" className="h-9 w-[8.5rem] border-yardline bg-sideline text-chalk">
+              <SelectTrigger aria-label="Season" className="h-9 w-34 border-yardline bg-sideline text-chalk">
                 <SelectValue placeholder="Season" />
               </SelectTrigger>
               <SelectContent>
@@ -254,7 +254,7 @@ const App = () => {
               onValueChange={(v) => setWeek(parseInt(v, 10))}
               disabled={!availableWeeks.length}
             >
-              <SelectTrigger aria-label="Week" className="h-9 w-[7rem] border-yardline bg-sideline text-chalk">
+              <SelectTrigger aria-label="Week" className="h-9 w-28 border-yardline bg-sideline text-chalk">
                 <SelectValue placeholder="Week" />
               </SelectTrigger>
               <SelectContent>
