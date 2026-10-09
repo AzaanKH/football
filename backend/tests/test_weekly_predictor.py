@@ -185,6 +185,17 @@ class TestPredictWeekContract:
 
         assert pred['confidence_low'] == pytest.approx(-1.5)
 
+    @pytest.mark.unit
+    def test_negative_projection_range_is_not_inverted(self):
+        """A 0 floor turned (-3, -0.5) around -1 into the inverted range (0, -0.5)."""
+        predictor = _predictor_with_models(point=-1.0, low=-3.0, high=-0.5)
+        features = pd.DataFrame([{'player_id': 'qb2', 'games_played_prior': 6}])
+
+        [pred] = predictor.predict_with_confidence('qb', features)
+
+        assert pred['confidence_low'] <= pred['predicted_points'] <= pred['confidence_high']
+        assert (pred['confidence_low'], pred['confidence_high']) == pytest.approx((-3.0, -0.5))
+
 
 class TestHasHistory:
     @pytest.mark.unit
@@ -400,6 +411,19 @@ class TestGameContext:
         }
         assert by_id['rb_rookie'].reason == 'bye'
         assert by_id['rb_rookie'].context['team'] == 'NYG'
+
+    @pytest.mark.unit
+    def test_no_bye_for_player_who_played_that_week(self):
+        """A past week: the current team (NYG) had a bye, but the player played for another team."""
+        predictor = _predictor_with_models()
+        features = pd.DataFrame([{'player_id': 'rb_rookie', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA),              patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE),              patch.object(predictor, '_get_played_ids', return_value={'rb_rookie'}),              patch.object(predictor, 'get_player_features', return_value=features):
+            [result] = predictor.predict_week(['rb_rookie'], season=2025, week=5)
+
+        assert result.status == 'ok'
+        # The old team is unknown at this point, so no (wrong) opponent is shown
+        assert result.context['opponent'] is None
 
     @pytest.mark.unit
     def test_no_bye_inferred_when_schedule_not_synced(self):

@@ -3,7 +3,7 @@ Unit tests for the NFL calendar (data_pipeline.season) and the season
 catch-up plan (setup_season).
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,7 +29,13 @@ class TestCalendar:
     @pytest.mark.parametrize('today, expected', [
         (date(2026, 10, 5), {'season': 2026, 'week': 4, 'season_type': 'regular'}),
         (date(2026, 9, 10), {'season': 2026, 'week': 1, 'season_type': 'regular'}),
+        # December/January boundary: still the 2026 regular season
+        (date(2026, 12, 31), {'season': 2026, 'week': 17, 'season_type': 'regular'}),
+        (date(2027, 1, 1), {'season': 2026, 'week': 17, 'season_type': 'regular'}),
+        # Final regular-season weekend (Jan 9-10, 2027)
+        (date(2027, 1, 10), {'season': 2026, 'week': 18, 'season_type': 'regular'}),
         (date(2027, 1, 20), {'season': 2026, 'week': 18, 'season_type': 'post'}),
+        (date(2027, 3, 1), {'season': 2027, 'week': 0, 'season_type': 'off'}),
         (date(2026, 6, 1), {'season': 2026, 'week': 0, 'season_type': 'off'}),
     ])
     def test_estimate_state_from_date(self, today, expected):
@@ -100,6 +106,85 @@ class TestCurrentContext:
         context = current_context(now=datetime(2026, 10, 5, 12, tzinfo=UTC))
 
         assert (context.season, context.week, context.source) == (2026, 4, 'calendar')
+
+    @pytest.mark.unit
+    def test_calendar_fallback_on_new_years_day_still_has_weeks_to_play(self, monkeypatch):
+        monkeypatch.setattr('data_pipeline.season.fetch_sleeper_state', lambda: None)
+
+        context = current_context(now=datetime(2027, 1, 1, tzinfo=UTC))
+
+        assert context.season == 2026
+        assert context.completed_weeks == list(range(1, 17))
+        assert context.prediction_week == 17
+
+    @staticmethod
+    def _schedule(ends):
+        """week_end_lookup over {week: last kickoff} for the 2026 season."""
+        return lambda season, week: ends.get(week) if season == 2026 else None
+
+    # Last kickoff of each 2026 week: Monday 00:15 UTC, starting Sep 15
+    REGULAR_ENDS = {
+        week: datetime(2026, 9, 15, 0, 15, tzinfo=UTC) + (week - 1) * timedelta(days=7)
+        for week in range(1, 19)
+    }
+
+    @pytest.mark.unit
+    def test_final_regular_season_weekend_from_schedule(self, monkeypatch):
+        monkeypatch.setattr('data_pipeline.season.fetch_sleeper_state', lambda: None)
+        ends = dict(self.REGULAR_ENDS)
+        ends[18] = datetime(2027, 1, 11, 1, 20, tzinfo=UTC)  # Sunday night game
+        lookup = self._schedule(ends)
+
+        during = current_context(week_end_lookup=lookup, now=datetime(2027, 1, 10, 18, tzinfo=UTC))
+        after = current_context(week_end_lookup=lookup, now=ends[18] + GAME_DURATION)
+
+        assert during.completed_weeks == list(range(1, 18)) and during.prediction_week == 18
+        assert after.completed_weeks == list(range(1, 19)) and after.is_offseason
+
+    @pytest.mark.unit
+    def test_schedule_overrides_date_estimate_for_moved_games(self, monkeypatch):
+        """A week-17 game moved to Thursday Jan 7: week 17 isn't over, whatever the date says."""
+        monkeypatch.setattr('data_pipeline.season.fetch_sleeper_state', lambda: None)
+        ends = dict(self.REGULAR_ENDS)
+        ends[17] = datetime(2027, 1, 8, 1, 15, tzinfo=UTC)
+        now = datetime(2027, 1, 7, 20, tzinfo=UTC)
+        assert estimate_state(now.date())['week'] == 18
+
+        context = current_context(week_end_lookup=self._schedule(ends), now=now)
+
+        assert context.completed_weeks == list(range(1, 17))
+        assert context.prediction_week == 17
+
+    @pytest.mark.unit
+    def test_wednesday_opener_from_schedule(self, monkeypatch):
+        """2026 kicks off Wednesday Sep 9, a day before the Thursday-after-Labor-Day estimate."""
+        monkeypatch.setattr('data_pipeline.season.fetch_sleeper_state', lambda: None)
+        now = datetime(2026, 9, 9, 23, tzinfo=UTC)
+        assert estimate_state(now.date())['season_type'] == 'off'
+
+        context = current_context(week_end_lookup=self._schedule(self.REGULAR_ENDS), now=now)
+
+        assert (context.season, context.week, context.season_type) == (2026, 1, 'regular')
+        assert context.prediction_week == 1
+
+    @pytest.mark.unit
+    def test_schedule_ignored_months_before_the_opener(self, monkeypatch):
+        monkeypatch.setattr('data_pipeline.season.fetch_sleeper_state', lambda: None)
+
+        context = current_context(week_end_lookup=self._schedule(self.REGULAR_ENDS),
+                                  now=datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert context.season_type == 'off' and context.is_offseason
+
+    @pytest.mark.unit
+    def test_incomplete_schedule_falls_back_to_date(self, monkeypatch):
+        monkeypatch.setattr('data_pipeline.season.fetch_sleeper_state', lambda: None)
+        ends = {w: e for w, e in self.REGULAR_ENDS.items() if w <= 5}
+
+        context = current_context(week_end_lookup=self._schedule(ends),
+                                  now=datetime(2027, 1, 1, tzinfo=UTC))
+
+        assert context.prediction_week == 17
 
     @pytest.mark.unit
     def test_uses_schedule_to_finish_the_current_week(self):

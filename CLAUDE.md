@@ -95,7 +95,12 @@ npm run preview
 ```
 
 Dependencies are pinned in `backend/requirements*.txt`
-(`requirements_test.txt` includes the others).
+(`requirements_test.txt` includes the others). Runtimes: Python 3.11+
+(pinned NumPy/scikit-learn), Node 22.12+ or 24+ (Vitest 5; `.nvmrc`).
+
+CI (`.github/workflows/ci.yml`) runs on every PR, stacked ones included:
+backend unit tests, frontend `npm ci`/test/build, and a fresh PostgreSQL
+built from `init_db.sql` with every migration re-applied on top.
 
 ## Architecture
 
@@ -118,9 +123,12 @@ Dependencies are pinned in `backend/requirements*.txt`
 ### Season calendar
 
 `data_pipeline/season.py` is the single source of truth: Sleeper's
-`/state/nfl`, else a date estimate (season opens the Thursday after Labor
-Day). A week is *finished* once its last kickoff (from the synced schedule)
-plus 4 hours has passed. Never hard-code a season; use `current_context()`.
+`/state/nfl`; else the synced schedule (current week = first week whose
+games haven't all finished); else a date estimate (season opens the
+Thursday after Labor Day; January belongs to the previous season, whose
+weeks 17-18 are played then). A week is *finished* once its last kickoff
+(from the synced schedule) plus 4 hours has passed. Never hard-code a
+season; use `current_context()`.
 
 ### Database
 
