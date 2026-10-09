@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import './index.css';
 
 // shadcn components
@@ -13,7 +12,15 @@ import { Skeleton } from './components/ui/skeleton';
 import { Progress } from './components/ui/progress';
 import { Separator } from './components/ui/separator';
 
-const API_BASE = 'http://localhost:5001';
+import {
+  errorMessage,
+  getModelStatus,
+  getSeasons,
+  getWeeks,
+  isCancel,
+  predictWeek,
+} from './lib/api';
+import { buildRequest, isStale, requestKey } from './lib/predictionState';
 
 // Icons
 const FootballIcon = () => (
@@ -95,133 +102,142 @@ const positionInfo = {
   wr: { label: 'Wide Receiver', color: 'bg-green-500', emoji: '🎯' },
 };
 
+
+let nextSlotKey = 0;
+const newSlot = () => ({ key: nextSlotKey++, player: null });
+
 const App = () => {
   const [position, setPosition] = useState('rb');
-  const [players, setPlayers] = useState([]);
-  const [selectedPlayerIds, setSelectedPlayerIds] = useState([]);
-  const [predictions, setPredictions] = useState([]);
-  const [unavailable, setUnavailable] = useState([]);
-  const [week, setWeek] = useState(15);
-  const [season] = useState(2025);
+  // Each slot holds a full player object so its label never depends on search results
+  const [slots, setSlots] = useState(() => [newSlot()]);
+  const [seasons, setSeasons] = useState([]);
+  const [season, setSeason] = useState(null);
   const [availableWeeks, setAvailableWeeks] = useState([]);
-  const [isLoadingPlayers, setIsLoadingPlayers] = useState(false);
+  const [week, setWeek] = useState(null);
+  // A result remembers the request that produced it: {request, predictions, unavailable}
+  const [result, setResult] = useState(null);
   const [isLoadingPredictions, setIsLoadingPredictions] = useState(false);
   const [error, setError] = useState(null);
+  const [setupError, setSetupError] = useState(null);
   const [systemStatus, setSystemStatus] = useState(null);
+  const inFlight = useRef(null); // {controller, key} of the pending prediction request
 
-  // Check system status on mount
+  // Check system status and load seasons on mount; the default season comes from the data
   useEffect(() => {
-    const checkStatus = async () => {
-      try {
-        const response = await axios.get(`${API_BASE}/model_status`);
-        setSystemStatus(response.data);
-      } catch (error) {
-        console.error('Error checking status:', error);
-      }
-    };
-    checkStatus();
+    getModelStatus()
+      .then(setSystemStatus)
+      .catch((err) => console.error('Error checking status:', err));
+
+    getSeasons()
+      .then((data) => {
+        setSeasons(data.seasons);
+        setSeason(data.default);
+      })
+      .catch(() => setSetupError('Could not reach the backend. Make sure it is running.'));
   }, []);
 
-  // Fetch available weeks
+  // Load weeks for the season; default to the latest week with data
   useEffect(() => {
-    const fetchWeeks = async () => {
-      try {
-        const response = await axios.get(`${API_BASE}/available_weeks?season=${season}`);
-        setAvailableWeeks(response.data.weeks || []);
-        if (response.data.weeks?.length > 0) {
-          setWeek(response.data.weeks[response.data.weeks.length - 1].week);
-        }
-      } catch (error) {
-        console.error('Error fetching weeks:', error);
-        // Generate default weeks if API fails
-        setAvailableWeeks(Array.from({ length: 17 }, (_, i) => ({ week: i + 1, players: 0 })));
-      }
-    };
-    fetchWeeks();
+    if (season == null) return undefined;
+    const controller = new AbortController();
+
+    getWeeks(season, controller.signal)
+      .then((weeks) => {
+        setAvailableWeeks(weeks);
+        setWeek((current) =>
+          weeks.some((w) => w.week === current) ? current : weeks[weeks.length - 1]?.week ?? null
+        );
+        setSetupError(weeks.length ? null : `No prediction data for the ${season} season yet.`);
+      })
+      .catch((err) => {
+        if (!isCancel(err)) setSetupError('Failed to load weeks for this season.');
+      });
+
+    return () => controller.abort();
   }, [season]);
 
-  // Fetch players when position changes
+  const players = slots.map((slot) => slot.player);
+  const currentRequest = useMemo(
+    () => buildRequest({ season, week, position, players }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [season, week, position, slots]
+  );
+  const currentKey = requestKey(currentRequest);
+  const stale = isStale(result, currentRequest);
+
+  // Inputs changed while a prediction was pending: its answer would be for old inputs
   useEffect(() => {
-    const fetchPlayers = async () => {
-      setIsLoadingPlayers(true);
-      setError(null);
-      try {
-        const response = await axios.get(`${API_BASE}/players?position=${position}&limit=200`);
-        setPlayers(response.data.map(p => ({
-          player_id: p.player_id,
-          PlayerName: p.full_name,
-          team: p.team
-        })));
-      } catch (error) {
-        console.error('Error fetching players:', error);
-        setError('Failed to load players. Make sure the backend is running.');
-      } finally {
-        setIsLoadingPlayers(false);
-      }
-    };
-    fetchPlayers();
-  }, [position]);
+    if (inFlight.current && inFlight.current.key !== currentKey) {
+      inFlight.current.controller.abort();
+      inFlight.current = null;
+      setIsLoadingPredictions(false);
+    }
+  }, [currentKey]);
 
   const handlePositionChange = (value) => {
     setPosition(value);
-    setSelectedPlayerIds([]);
-    setPredictions([]);
-    setUnavailable([]);
+    setSlots([newSlot()]);
+    setResult(null);
+    setError(null);
   };
 
-  const handlePlayerChange = (index, playerId) => {
-    const updated = [...selectedPlayerIds];
-    updated[index] = playerId;
-    setSelectedPlayerIds(updated);
+  const handlePlayerChange = (key, player) => {
+    setSlots((current) => current.map((slot) => (slot.key === key ? { ...slot, player } : slot)));
   };
 
-  const addPlayer = () => {
-    setSelectedPlayerIds([...selectedPlayerIds, '']);
-  };
+  const addPlayer = () => setSlots((current) => [...current, newSlot()]);
 
-  const removePlayer = (index) => {
-    setSelectedPlayerIds(selectedPlayerIds.filter((_, i) => i !== index));
-  };
+  const removePlayer = (key) => setSlots((current) => current.filter((slot) => slot.key !== key));
 
   const getPredictions = async () => {
-    const validIds = selectedPlayerIds.filter(id => id);
-    if (validIds.length === 0) {
+    const request = currentRequest;
+    if (request.playerIds.length === 0) {
       setError('Please select at least one player.');
       return;
     }
 
+    inFlight.current?.controller.abort();
+    const controller = new AbortController();
+    inFlight.current = { controller, key: requestKey(request) };
     setIsLoadingPredictions(true);
     setError(null);
 
     try {
-      const response = await axios.post(`${API_BASE}/predict_week`, {
-        position,
-        player_ids: validIds,
-        week,
-        season
+      const data = await predictWeek(request, controller.signal);
+      setResult({
+        request,
+        predictions: data.predictions.map((p) => ({
+          playerId: p.player_id,
+          playerName: p.player_name,
+          predictedPoints: p.predicted_points,
+          confidenceLow: p.confidence_low,
+          confidenceHigh: p.confidence_high,
+          features: p.features,
+        })),
+        // Players the backend couldn't predict, each with a human-readable reason
+        unavailable: data.unavailable || [],
       });
-
-      setPredictions(response.data.predictions.map(p => ({
-        PlayerName: p.player_name,
-        PredictedPoints: p.predicted_points,
-        ConfidenceLow: p.confidence_low,
-        ConfidenceHigh: p.confidence_high,
-        features: p.features
-      })));
-      // Players the backend couldn't predict, each with a human-readable reason
-      setUnavailable(response.data.unavailable || []);
-    } catch (error) {
-      console.error('Error fetching predictions:', error);
-      setError(error.response?.data?.error || 'Failed to get predictions.');
+    } catch (err) {
+      if (isCancel(err)) return;
+      console.error('Error fetching predictions:', err);
+      setError(errorMessage(err, 'Failed to get predictions.'));
     } finally {
-      setIsLoadingPredictions(false);
+      if (inFlight.current?.controller === controller) {
+        inFlight.current = null;
+        setIsLoadingPredictions(false);
+      }
     }
   };
 
-  const getMaxPoints = () => {
-    if (predictions.length === 0) return 30;
-    return Math.max(...predictions.map(p => p.PredictedPoints)) * 1.1;
-  };
+  const predictions = result?.predictions ?? [];
+  const unavailable = result?.unavailable ?? [];
+  const resultWeek = result?.request.week;
+  const maxPoints = predictions.length
+    ? Math.max(...predictions.map((p) => p.predictedPoints)) * 1.1
+    : 30;
+  const selectedCount = currentRequest.playerIds.length;
+  const selectedIds = players.filter(Boolean).map((p) => p.player_id);
+  const ready = season != null && week != null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
@@ -236,7 +252,7 @@ const App = () => {
               <div>
                 <h1 className="text-xl font-bold text-white">Fantasy Football Predictor</h1>
                 <p className="text-sm text-slate-400">
-                  {`Week ${week} Predictions`}
+                  {ready ? `${season} · Week ${week} Predictions` : 'Loading...'}
                 </p>
               </div>
             </div>
@@ -244,7 +260,7 @@ const App = () => {
               {systemStatus?.weekly_predictor_available ? (
                 <Badge variant="outline" className="text-primary border-primary">
                   <SparklesIcon />
-                  <span className="ml-1">Phase 4 Active</span>
+                  <span className="ml-1">Model Ready</span>
                 </Badge>
               ) : (
                 <Badge variant="outline" className="text-yellow-500 border-yellow-500">
@@ -257,7 +273,13 @@ const App = () => {
       </header>
 
       <main className="container mx-auto px-4 py-8">
-        {/* Week Selection (only for new system) */}
+        {setupError && (
+          <div role="alert" className="mb-6 p-3 rounded-lg bg-destructive/20 border border-destructive/50 text-destructive text-sm">
+            {setupError}
+          </div>
+        )}
+
+        {/* Season / Week Selection */}
         <Card className="mb-6 bg-slate-800/50 border-slate-700 backdrop-blur-sm">
           <CardHeader className="pb-3">
             <CardTitle className="text-white flex items-center gap-2">
@@ -269,9 +291,13 @@ const App = () => {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center gap-4">
-              <Select value={week.toString()} onValueChange={(v) => setWeek(parseInt(v))}>
-                <SelectTrigger className="w-48 bg-slate-700/50 border-slate-600 text-white">
+            <div className="flex flex-wrap items-center gap-4">
+              <Select
+                value={week != null ? week.toString() : undefined}
+                onValueChange={(v) => setWeek(parseInt(v, 10))}
+                disabled={!availableWeeks.length}
+              >
+                <SelectTrigger aria-label="Week" className="w-48 bg-slate-700/50 border-slate-600 text-white">
                   <SelectValue placeholder="Select week" />
                 </SelectTrigger>
                 <SelectContent className="bg-slate-800 border-slate-700">
@@ -286,7 +312,22 @@ const App = () => {
                   ))}
                 </SelectContent>
               </Select>
-              <span className="text-slate-400">Season {season}</span>
+              <Select
+                value={season != null ? season.toString() : undefined}
+                onValueChange={(v) => setSeason(parseInt(v, 10))}
+                disabled={!seasons.length}
+              >
+                <SelectTrigger aria-label="Season" className="w-36 bg-slate-700/50 border-slate-600 text-white">
+                  <SelectValue placeholder="Season" />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-700">
+                  {seasons.map((s) => (
+                    <SelectItem key={s} value={s.toString()} className="text-white hover:bg-slate-700">
+                      Season {s}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </CardContent>
         </Card>
@@ -325,98 +366,108 @@ const App = () => {
                 <ChartIcon />
                 Player Selection
                 <Badge className="ml-auto" variant="secondary">
-                  {selectedPlayerIds.filter(id => id).length} selected
+                  {selectedCount} selected
                 </Badge>
               </CardTitle>
               <CardDescription className="text-slate-400">
-                Compare players for your Week {week} lineup
+                {ready ? `Compare players for your Week ${week} lineup` : 'Loading weeks...'}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               {error && (
-                <div className="p-3 rounded-lg bg-destructive/20 border border-destructive/50 text-destructive text-sm animate-bounce-in">
+                <div role="alert" className="p-3 rounded-lg bg-destructive/20 border border-destructive/50 text-destructive text-sm animate-bounce-in">
                   {error}
                 </div>
               )}
 
-              {isLoadingPlayers ? (
-                <div className="space-y-3">
-                  {[1, 2, 3].map((i) => (
-                    <Skeleton key={i} className="h-12 w-full bg-slate-700" />
-                  ))}
-                </div>
-              ) : (
-                <>
-                  {selectedPlayerIds.map((playerId, index) => (
-                    <div
-                      key={index}
-                      className="flex gap-2 items-center animate-slide-up"
-                      style={{ animationDelay: `${index * 50}ms` }}
-                    >
-                      <div className="flex-1">
-                        <PlayerCombobox
-                          players={players}
-                          value={playerId}
-                          onValueChange={(value) => handlePlayerChange(index, value)}
-                          placeholder="Search for a player..."
-                        />
-                      </div>
-                      <Button
-                        variant="destructive"
-                        size="icon"
-                        onClick={() => removePlayer(index)}
-                        className="shrink-0"
-                      >
-                        <TrashIcon />
-                      </Button>
-                    </div>
-                  ))}
-
+              {slots.map((slot, index) => (
+                <div
+                  key={slot.key}
+                  className="flex gap-2 items-center animate-slide-up"
+                  style={{ animationDelay: `${index * 50}ms` }}
+                >
+                  <div className="flex-1">
+                    <PlayerCombobox
+                      position={position}
+                      season={season}
+                      week={week}
+                      value={slot.player}
+                      excludeIds={selectedIds}
+                      onValueChange={(player) => handlePlayerChange(slot.key, player)}
+                      placeholder="Search for a player..."
+                    />
+                  </div>
                   <Button
-                    onClick={addPlayer}
-                    variant="outline"
-                    className="w-full border-dashed border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
+                    variant="destructive"
+                    size="icon"
+                    onClick={() => removePlayer(slot.key)}
+                    className="shrink-0"
+                    aria-label={slot.player ? `Remove ${slot.player.name}` : 'Remove player slot'}
                   >
-                    <PlusIcon />
+                    <TrashIcon />
+                  </Button>
+                </div>
+              ))}
+
+              <Button
+                onClick={addPlayer}
+                variant="outline"
+                className="w-full border-dashed border-slate-600 text-slate-300 hover:bg-slate-700 hover:text-white"
+              >
+                <PlusIcon />
                 <span className="ml-2">Add Player</span>
               </Button>
 
-                  <Separator className="bg-slate-700" />
+              <Separator className="bg-slate-700" />
 
-                  <Button
-                    onClick={getPredictions}
-                    className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-6"
-                    disabled={isLoadingPredictions || selectedPlayerIds.filter(id => id).length === 0}
-                  >
-                    {isLoadingPredictions ? (
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        Analyzing Week {week}...
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <SparklesIcon />
-                        Predict Week {week}
-                      </div>
-                    )}
-                  </Button>
-                </>
-              )}
+              <Button
+                onClick={getPredictions}
+                className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-6"
+                disabled={!ready || isLoadingPredictions || selectedCount === 0}
+              >
+                {isLoadingPredictions ? (
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Analyzing Week {week}...
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <SparklesIcon />
+                    Predict Week {week ?? ''}
+                  </div>
+                )}
+              </Button>
             </CardContent>
           </Card>
 
-          {/* Predictions Results */}
+          {/* Predictions Results: labeled with the request that produced them */}
           <Card className="bg-slate-800/50 border-slate-700 backdrop-blur-sm">
             <CardHeader>
               <CardTitle className="text-white flex items-center gap-2">
                 <TrophyIcon />
-                Week {week} Predictions
+                {result ? `Week ${resultWeek} Predictions` : 'Predictions'}
               </CardTitle>
               <CardDescription className="text-slate-400">
-                Projected fantasy points for upcoming game
+                {result
+                  ? `${result.request.season} season · PPR scoring`
+                  : 'Projected fantasy points for upcoming game'}
               </CardDescription>
             </CardHeader>
             <CardContent>
+              {stale && !isLoadingPredictions && (
+                <div
+                  role="status"
+                  className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-500/50 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200"
+                >
+                  <span>These results are for your previous selection (Week {resultWeek}).</span>
+                  {ready && selectedCount > 0 && (
+                    <Button size="sm" variant="outline" onClick={getPredictions}>
+                      Update for Week {week}
+                    </Button>
+                  )}
+                </div>
+              )}
+
               {isLoadingPredictions ? (
                 <div className="space-y-4">
                   {[1, 2, 3].map((i) => (
@@ -426,11 +477,11 @@ const App = () => {
                     </div>
                   ))}
                 </div>
-              ) : predictions.length > 0 || unavailable.length > 0 ? (
-                <div className="space-y-4">
+              ) : result ? (
+                <div className={`space-y-4 ${stale ? 'opacity-60' : ''}`}>
                   {predictions.map((player, index) => (
                     <div
-                      key={index}
+                      key={player.playerId}
                       className="animate-bounce-in"
                       style={{ animationDelay: `${index * 100}ms` }}
                     >
@@ -450,7 +501,7 @@ const App = () => {
                             {index + 1}
                           </div>
                           <div>
-                            <span className="text-white font-medium">{player.PlayerName}</span>
+                            <span className="text-white font-medium">{player.playerName}</span>
                             {player.features?.trend === 'improving' && (
                               <span className="ml-2" title="Trending up"><TrendUpIcon /></span>
                             )}
@@ -467,29 +518,26 @@ const App = () => {
                           }`}
                           variant="outline"
                         >
-                          {player.PredictedPoints.toFixed(1)} pts
+                          {player.predictedPoints.toFixed(1)} pts
                         </Badge>
                       </div>
 
                       <Progress
-                        value={player.PredictedPoints}
-                        max={getMaxPoints()}
+                        value={player.predictedPoints}
+                        max={maxPoints}
                         className={`h-2 ${index === 0 ? 'bg-yellow-500/20' : 'bg-slate-700'}`}
                       />
 
-                      {/* Confidence interval */}
-                      {player.ConfidenceLow !== undefined && player.ConfidenceHigh !== undefined && (
-                        <div className="flex items-center justify-between mt-1">
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-slate-500">
+                          Range: {player.confidenceLow.toFixed(1)} - {player.confidenceHigh.toFixed(1)} pts
+                        </p>
+                        {player.features?.avg_3_games != null && (
                           <p className="text-xs text-slate-500">
-                            Range: {player.ConfidenceLow.toFixed(1)} - {player.ConfidenceHigh.toFixed(1)} pts
+                            3-game avg: {Number(player.features.avg_3_games).toFixed(1)}
                           </p>
-                          {player.features?.avg_3_games != null && !isNaN(Number(player.features.avg_3_games)) && (
-                            <p className="text-xs text-slate-500">
-                              3-game avg: {Number(player.features.avg_3_games).toFixed(1)}
-                            </p>
-                          )}
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   ))}
 
@@ -510,18 +558,15 @@ const App = () => {
                     </div>
                   )}
 
-                  <Separator className="bg-slate-700 my-4" />
-
-                  <div className="text-center">
-                    <p className="text-sm text-slate-400">
-                      {predictions.length > 0 && (
-                        <>
-                          <span className="text-primary font-semibold">{predictions[0].PlayerName}</span>
-                          {' '}is projected to score the most in Week {week}!
-                        </>
-                      )}
-                    </p>
-                  </div>
+                  {predictions.length > 0 && (
+                    <>
+                      <Separator className="bg-slate-700 my-4" />
+                      <p className="text-center text-sm text-slate-400">
+                        <span className="text-primary font-semibold">{predictions[0].playerName}</span>
+                        {' '}is projected to score the most in Week {resultWeek}!
+                      </p>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="text-center py-12">
@@ -530,7 +575,7 @@ const App = () => {
                   </div>
                   <p className="text-slate-400">No predictions yet</p>
                   <p className="text-sm text-slate-500 mt-1">
-                    Select players and click "Predict Week {week}" to see results
+                    Select players and click "Predict Week {week ?? ''}" to see results
                   </p>
                 </div>
               )}

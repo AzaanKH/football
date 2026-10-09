@@ -255,22 +255,40 @@ def get_players_postgres():
     if len(search) > 100:
         raise BadRequest('search must be at most 100 characters')
 
-    query = """
-        SELECT player_id, full_name, team, position
-        FROM players
-        WHERE position IN ('QB', 'RB', 'WR', 'TE')
-    """
-    params = []
+    # With season+week: only players who have features for that week (i.e. can
+    # be predicted), most productive first. Otherwise: everyone, alphabetical.
+    week_arg = request.args.get('week')
+    week = _int_param(week_arg, 'week', 1, 22) if week_arg else None
+    season = _season_param(request.args.get('season')) if week else None
+
+    if week:
+        query = """
+            SELECT p.player_id, p.full_name, p.team, p.position
+            FROM players p
+            JOIN player_features pf
+                ON pf.player_id = p.player_id AND pf.season = %s AND pf.week = %s
+            WHERE p.position IN ('QB', 'RB', 'WR', 'TE')
+        """
+        params = [season, week]
+        order = " ORDER BY pf.fantasy_pts_avg_3 DESC NULLS LAST, p.full_name"
+    else:
+        query = """
+            SELECT p.player_id, p.full_name, p.team, p.position
+            FROM players p
+            WHERE p.position IN ('QB', 'RB', 'WR', 'TE')
+        """
+        params = []
+        order = " ORDER BY p.full_name"
 
     if position:
-        query += " AND position = %s"
+        query += " AND p.position = %s"
         params.append(position)
 
     if search:
-        query += " AND full_name ILIKE %s"
-        params.append(f'%{search}%')
+        query += " AND (p.full_name ILIKE %s OR p.team ILIKE %s)"
+        params.extend([f'%{search}%', search])
 
-    query += " ORDER BY full_name LIMIT %s"
+    query += order + " LIMIT %s"
     params.append(limit)
 
     with db_connection() as conn:
@@ -345,6 +363,26 @@ def predict_week():
         'position': position,
         'predictions': results,
         'unavailable': unavailable
+    })
+
+
+@app.route('/seasons', methods=['GET'])
+def seasons():
+    """
+    Seasons that have computed features, newest first.
+
+    Returns:
+        {seasons: [2025, 2024, ...], default: <newest season with data>}
+        default falls back to DEFAULT_SEASON when no features exist yet.
+    """
+    with db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT season FROM player_features ORDER BY season DESC")
+        available = [row[0] for row in cursor.fetchall()]
+
+    return jsonify({
+        'seasons': available,
+        'default': available[0] if available else DEFAULT_SEASON,
     })
 
 

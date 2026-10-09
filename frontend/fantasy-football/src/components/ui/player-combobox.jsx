@@ -4,6 +4,7 @@ import * as React from "react"
 import { Check, ChevronsUpDown } from "lucide-react"
 
 import { cn } from "../../lib/utils"
+import { isCancel, searchPlayers } from "../../lib/api"
 import { Button } from "./button"
 import {
   Command,
@@ -19,26 +20,74 @@ import {
   PopoverTrigger,
 } from "./popover"
 
-export function PlayerCombobox({ players, value, onValueChange, placeholder = "Select player..." }) {
-  const [open, setOpen] = React.useState(false)
+const SEARCH_DEBOUNCE_MS = 250
 
-  // Find the selected player
-  const selectedPlayer = players.find(
-    p => (p.player_id || p.PlayerName) === value
+/**
+ * Searchable player picker backed by server-side search, so every player is
+ * reachable (not just a preloaded page). `value` is a player object
+ * ({player_id, name, team}) so the label survives new search results.
+ */
+export function PlayerCombobox({
+  position,
+  season,
+  week,
+  value,
+  onValueChange,
+  excludeIds = [],
+  placeholder = "Select player...",
+}) {
+  const [open, setOpen] = React.useState(false)
+  const [query, setQuery] = React.useState("")
+  const [results, setResults] = React.useState([])
+  const [status, setStatus] = React.useState("idle") // idle | loading | error
+
+  React.useEffect(() => {
+    if (!open) return undefined
+
+    // Each keystroke cancels the previous search, so results can't arrive out of order
+    const controller = new AbortController()
+    const timer = setTimeout(async () => {
+      setStatus("loading")
+      try {
+        const players = await searchPlayers(
+          { position, season, week, search: query.trim() },
+          controller.signal
+        )
+        setResults(players)
+        setStatus("idle")
+      } catch (error) {
+        if (!isCancel(error)) setStatus("error")
+      }
+    }, query ? SEARCH_DEBOUNCE_MS : 0)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [open, query, position, season, week])
+
+  const handleOpenChange = (next) => {
+    setOpen(next)
+    if (!next) setQuery("")
+  }
+
+  const visible = results.filter(
+    (p) => p.player_id === value?.player_id || !excludeIds.includes(p.player_id)
   )
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <Button
           variant="outline"
           role="combobox"
           aria-expanded={open}
+          aria-label={value ? `Player: ${value.name}` : placeholder}
           className="w-full justify-between bg-slate-700/50 border-slate-600 text-white hover:bg-slate-700 hover:text-white"
         >
-          {selectedPlayer ? (
+          {value ? (
             <span className="truncate">
-              {selectedPlayer.PlayerName} {selectedPlayer.team ? `(${selectedPlayer.team})` : ''}
+              {value.name} {value.team ? `(${value.team})` : ''}
             </span>
           ) : (
             <span className="text-slate-400">{placeholder}</span>
@@ -47,27 +96,39 @@ export function PlayerCombobox({ players, value, onValueChange, placeholder = "S
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-[350px] p-0 bg-slate-800 border-slate-700" align="start">
-        <Command className="bg-transparent">
+        {/* Filtering happens on the server; cmdk only handles keyboard navigation */}
+        <Command className="bg-transparent" shouldFilter={false}>
           <CommandInput
-            placeholder="Search players..."
+            value={query}
+            onValueChange={setQuery}
+            placeholder="Search by name or team..."
             className="text-white placeholder:text-slate-400"
           />
           <CommandList className="max-h-[300px]">
-            <CommandEmpty className="text-slate-400 py-6 text-center text-sm">
-              No player found.
-            </CommandEmpty>
+            {status === "idle" && (
+              <CommandEmpty className="text-slate-400 py-6 text-center text-sm">
+                No player found.
+              </CommandEmpty>
+            )}
+            {status === "loading" && visible.length === 0 && (
+              <div className="text-slate-400 py-6 text-center text-sm">Searching...</div>
+            )}
+            {status === "error" && (
+              <div role="alert" className="text-destructive py-6 text-center text-sm">
+                Search failed. Is the backend running?
+              </div>
+            )}
             <CommandGroup>
-              {players.map((player, index) => {
-                const playerId = player.player_id || player.PlayerName
-                const isSelected = playerId === value
+              {visible.map((player) => {
+                const isSelected = player.player_id === value?.player_id
 
                 return (
                   <CommandItem
-                    key={playerId || index}
-                    value={`${player.PlayerName} ${player.team || ''}`}
+                    key={player.player_id}
+                    value={player.player_id}
                     onSelect={() => {
-                      onValueChange(playerId === value ? "" : playerId)
-                      setOpen(false)
+                      onValueChange(isSelected ? null : player)
+                      handleOpenChange(false)
                     }}
                     className="text-white hover:bg-slate-700 aria-selected:bg-slate-700 cursor-pointer"
                   >
@@ -77,13 +138,9 @@ export function PlayerCombobox({ players, value, onValueChange, placeholder = "S
                         isSelected ? "opacity-100 text-primary" : "opacity-0"
                       )}
                     />
-                    <span className="flex-1 truncate">
-                      {player.PlayerName}
-                    </span>
+                    <span className="flex-1 truncate">{player.name}</span>
                     {player.team && (
-                      <span className="text-slate-400 text-xs ml-2">
-                        {player.team}
-                      </span>
+                      <span className="text-slate-400 text-xs ml-2">{player.team}</span>
                     )}
                   </CommandItem>
                 )
