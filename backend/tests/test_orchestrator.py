@@ -273,13 +273,17 @@ class TestDataOrchestratorUnit:
     def test_sync_projections_success(self, mock_orchestrator, sample_projections):
         """Test successful projections sync."""
         mocks = mock_orchestrator
-        mocks['sleeper'].get_weekly_projections.return_value = sample_projections
+        mocks['sleeper'].get_weekly_projections.return_value = {
+            **sample_projections, 'KC': {'pts_ppr': 8.0},  # team defense: untracked
+        }
         cursor = mocks['db']['cursor']
-        cursor.rowcount = 1
+        cursor.fetchall.return_value = [(pid,) for pid in sample_projections]
+        cursor.fetchone.return_value = (True,)
 
         result = mocks['orchestrator'].sync_projections(2024, 10)
 
         assert result['processed'] == 2
+        assert result['inserted'] == 2
         mocks['sleeper'].get_weekly_projections.assert_called_once_with(2024, 10)
 
     @pytest.mark.unit

@@ -26,6 +26,8 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
+from metrics import conformal_adjustment, interval_coverage, score
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,20 @@ UNAVAILABLE_MESSAGES = {
 }
 
 BOOL_FEATURES = ('is_home', 'has_prev_season_data', 'has_full_window_3', 'has_full_window_5')
+
+# Sleeper's pre-game PPR projection for the week being predicted
+SLEEPER_FEATURE = 'sleeper_proj'
+
+# Target coverage of the confidence range (10th-90th percentile)
+INTERVAL_COVERAGE = 0.80
+# Share of training weeks (latest) held back to choose the point strategy and
+# calibrate the range
+CALIBRATION_RATIO = 0.2
+
+# How the point prediction is produced, chosen per position at training time
+POINT_SLEEPER = 'sleeper'                   # Sleeper projection as-is
+POINT_SLEEPER_CORRECTED = 'sleeper+model'   # Sleeper + learned correction
+POINT_MODEL = 'model'                       # standalone model (no projection)
 
 
 def _to_float(value) -> Optional[float]:
@@ -139,6 +155,9 @@ class WeeklyPredictor:
         'opp_fantasy_pts_allowed',
         'is_home',
         'days_rest',
+
+        # Sleeper's own pre-game PPR projection (point estimate anchor)
+        SLEEPER_FEATURE,
     ]
 
     # Separate feature sets by position
@@ -152,6 +171,7 @@ class WeeklyPredictor:
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
         'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
+        SLEEPER_FEATURE,
     ]
 
     RB_FEATURES = [
@@ -165,6 +185,7 @@ class WeeklyPredictor:
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
         'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
+        SLEEPER_FEATURE,
     ]
 
     WR_FEATURES = [
@@ -177,6 +198,7 @@ class WeeklyPredictor:
         'fantasy_pts_std_5', 'boom_rate_5', 'bust_rate_5', 'floor_score',
         'fantasy_pts_trend_3', 'usage_trend_3',
         'opp_position_rank', 'opp_fantasy_pts_allowed', 'is_home', 'days_rest',
+        SLEEPER_FEATURE,
     ]
 
     def __init__(self, db_connection=None):
@@ -196,6 +218,13 @@ class WeeklyPredictor:
         # 'nan': missing values stay NaN (models handle them natively).
         # 'zero': legacy pickles trained with fillna(0); kept for compatibility.
         self.missing_strategy = 'nan'
+        # Per position: how the point estimate is produced (POINT_* constants),
+        # the optional correction to Sleeper's projection, and the conformal
+        # widening (+) / narrowing (-) applied to the 10th-90th percentile range
+        self.point_strategy: Dict[str, str] = {}
+        self.correction_models: Dict[str, Optional[XGBRegressor]] = {}
+        self.interval_adjustment: Dict[str, float] = {}
+        self.calibration: Dict[str, Dict] = {}
         self._is_trained = False
 
     def get_features_for_position(self, position: str) -> List[str]:
@@ -229,6 +258,7 @@ class WeeklyPredictor:
         query = """
             SELECT
                 pf.*,
+                pp.projected_points_ppr as sleeper_proj,
                 pws.fantasy_points_ppr as actual_points
             FROM player_features pf
             JOIN player_weekly_stats pws
@@ -237,6 +267,11 @@ class WeeklyPredictor:
                 AND pf.week = pws.week
             JOIN players p
                 ON pf.player_id = p.player_id
+            LEFT JOIN player_projections pp
+                ON pp.player_id = pf.player_id
+                AND pp.season = pf.season
+                AND pp.week = pf.week
+                AND pp.source = 'sleeper'
             WHERE p.position = %s
                 AND pws.fantasy_points_ppr IS NOT NULL
                 -- Target is points *if the player plays*; inactive weeks aren't outcomes
@@ -321,31 +356,9 @@ class WeeklyPredictor:
 
         return X[train_mask], X[test_mask], y[train_mask], y[test_mask]
 
-    def train(self, position: str, X: pd.DataFrame = None, y: pd.Series = None) -> Dict:
-        """
-        Train prediction model for a position.
-
-        Args:
-            position: 'qb', 'rb', or 'wr'
-            X: Optional feature DataFrame (if not provided, queries DB)
-            y: Optional target Series
-
-        Returns:
-            Training metrics dictionary
-        """
-        position = position.lower()
-
-        if X is None or y is None:
-            X, y, meta = self._build_training_data(position)
-        else:
-            meta = pd.DataFrame({'season': [0] * len(X), 'week': list(range(len(X)))})
-
-        logger.info(f"Training {position.upper()} model with {len(X)} samples, {len(X.columns)} features")
-
-        X_train, X_test, y_train, y_test = self._temporal_train_test_split(X, y, meta)
-
-        # Train main model
-        model = XGBRegressor(
+    @staticmethod
+    def _new_point_model() -> XGBRegressor:
+        return XGBRegressor(
             n_estimators=200,
             learning_rate=0.05,
             max_depth=4,
@@ -354,63 +367,177 @@ class WeeklyPredictor:
             random_state=42,
             n_jobs=-1
         )
-        model.fit(X_train, y_train)
-        self.models[position] = model
+
+    @staticmethod
+    def _new_correction_model() -> XGBRegressor:
+        # Shallow and heavily regularized: adjusts Sleeper's projection only
+        # where features carry a consistent signal; deeper models fit noise
+        return XGBRegressor(
+            n_estimators=100,
+            learning_rate=0.03,
+            max_depth=2,
+            min_child_weight=20,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1
+        )
+
+    @staticmethod
+    def _new_quantile_model(quantile: float) -> HistGradientBoostingRegressor:
+        # HistGradientBoosting handles NaN natively
+        return HistGradientBoostingRegressor(
+            loss='quantile',
+            quantile=quantile,
+            max_iter=100,
+            max_depth=3,
+            learning_rate=0.1,
+            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
+            random_state=42
+        )
+
+    def fit(self, position: str, X: pd.DataFrame, y: pd.Series,
+            meta: Optional[pd.DataFrame] = None) -> None:
+        """
+        Fit every model for a position on exactly the rows given.
+
+        1. Standalone model (no Sleeper projection), on all rows: fallback for
+           players without a projection.
+        2. On the older weeks: a correction model (actual - Sleeper projection)
+           and the 10th/90th percentile range models.
+        3. On the newest CALIBRATION_RATIO of weeks (meta gives season/week):
+           - keep the correction only if it beats Sleeper alone (lower MAE and
+             no worse start/sit accuracy), otherwise use Sleeper as-is;
+           - conformal adjustment so the range covers INTERVAL_COVERAGE.
+        4. Refit the correction model on all rows if it was kept.
+        """
+        position = position.lower()
+        y = pd.Series(np.asarray(y, dtype=float), index=X.index)
+
+        standalone_cols = [c for c in X.columns if c != SLEEPER_FEATURE]
+        standalone = self._new_point_model()
+        standalone.fit(X[standalone_cols], y)
+
+        enough_weeks = meta is not None and len(meta[['season', 'week']].drop_duplicates()) >= 2
+        if enough_weeks:
+            fit_X, cal_X, fit_y, cal_y = self._temporal_train_test_split(X, y, meta, CALIBRATION_RATIO)
+        else:
+            fit_X, cal_X, fit_y, cal_y = X, X.iloc[0:0], y, y.iloc[0:0]
+
+        lower = self._new_quantile_model(0.10).fit(fit_X, fit_y)
+        upper = self._new_quantile_model(0.90).fit(fit_X, fit_y)
+
+        strategy = POINT_MODEL
+        correction = None
+        calibration: Dict[str, object] = {'calibration_rows': int(len(cal_X))}
+
+        if SLEEPER_FEATURE in X.columns and X[SLEEPER_FEATURE].notna().any():
+            strategy = POINT_SLEEPER
+            fit_rows = fit_X[SLEEPER_FEATURE].notna()
+            cal_rows = cal_X[SLEEPER_FEATURE].notna()
+            if fit_rows.any() and cal_rows.any():
+                candidate = self._new_correction_model().fit(
+                    fit_X[fit_rows], fit_y[fit_rows] - fit_X.loc[fit_rows, SLEEPER_FEATURE]
+                )
+                frame = pd.DataFrame({
+                    'season': meta.loc[cal_X.index[cal_rows], 'season'].to_numpy(),
+                    'week': meta.loc[cal_X.index[cal_rows], 'week'].to_numpy(),
+                    'actual': cal_y[cal_rows].to_numpy(),
+                    SLEEPER_FEATURE: cal_X.loc[cal_rows, SLEEPER_FEATURE].to_numpy(),
+                })
+                frame['corrected'] = frame[SLEEPER_FEATURE] + candidate.predict(cal_X[cal_rows])
+                alone, corrected = score(frame, SLEEPER_FEATURE), score(frame, 'corrected')
+                calibration['sleeper'] = alone
+                calibration['sleeper+model'] = corrected
+                # NaN start/sit (no decisions) never blocks the correction
+                not_worse = not corrected['start_sit'] < alone['start_sit']
+                if corrected['mae'] < alone['mae'] and not_worse:
+                    strategy = POINT_SLEEPER_CORRECTED
+
+            if strategy == POINT_SLEEPER_CORRECTED:
+                rows = X[SLEEPER_FEATURE].notna()
+                correction = self._new_correction_model().fit(
+                    X[rows], y[rows] - X.loc[rows, SLEEPER_FEATURE]
+                )
+
+        adjustment = 0.0
+        if len(cal_X):
+            raw_low, raw_high = lower.predict(cal_X), upper.predict(cal_X)
+            adjustment = conformal_adjustment(cal_y, raw_low, raw_high, INTERVAL_COVERAGE)
+            calibration['raw_coverage'] = interval_coverage(cal_y, raw_low, raw_high)
+
+        calibration.update({'strategy': strategy, 'interval_adjustment': adjustment})
+        logger.info(
+            f"{position.upper()} point strategy: {strategy}; range adjusted by "
+            f"{adjustment:+.2f} pts (raw coverage {calibration.get('raw_coverage', float('nan')):.1%})"
+        )
+
+        self.models[position] = standalone
+        self.quantile_models[position] = {'lower': lower, 'upper': upper}
+        self.correction_models[position] = correction
+        self.point_strategy[position] = strategy
+        self.interval_adjustment[position] = adjustment
+        self.calibration[position] = calibration
         self.feature_columns[position] = list(X.columns)
+        self._is_trained = True
 
-        # Train quantile models for confidence intervals
-        self.quantile_models[position] = {}
+    def train(self, position: str, X: pd.DataFrame = None, y: pd.Series = None,
+              refit_full: bool = True) -> Dict:
+        """
+        Train prediction models for a position.
 
-        # Lower bound (10th percentile). HistGradientBoosting handles NaN natively.
-        lower_model = HistGradientBoostingRegressor(
-            loss='quantile',
-            quantile=0.10,
-            max_iter=100,
-            max_depth=3,
-            learning_rate=0.1,
-            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
-            random_state=42
-        )
-        lower_model.fit(X_train, y_train)
-        self.quantile_models[position]['lower'] = lower_model
+        Fits on older weeks and measures on the held-out latest weeks; then,
+        unless refit_full is False, refits on every week so the saved model
+        also learns from the most recent games.
 
-        # Upper bound (90th percentile)
-        upper_model = HistGradientBoostingRegressor(
-            loss='quantile',
-            quantile=0.90,
-            max_iter=100,
-            max_depth=3,
-            learning_rate=0.1,
-            early_stopping=False,  # 'auto' silently stops after ~10 iterations on WR-sized data
-            random_state=42
-        )
-        upper_model.fit(X_train, y_train)
-        self.quantile_models[position]['upper'] = upper_model
+        Args:
+            position: 'qb', 'rb', or 'wr'
+            X: Optional feature DataFrame (if not provided, queries DB)
+            y: Optional target Series
+            refit_full: Refit on all rows after evaluation
 
-        # Evaluate
-        y_pred = model.predict(X_test)
+        Returns:
+            Training metrics dictionary (measured on the held-out weeks)
+        """
+        position = position.lower()
+
+        if X is None or y is None:
+            X, y, meta = self._build_training_data(position)
+        else:
+            meta = pd.DataFrame({'season': [0] * len(X), 'week': list(range(len(X)))}, index=X.index)
+
+        logger.info(f"Training {position.upper()} model with {len(X)} samples, {len(X.columns)} features")
+
+        X_train, X_test, y_train, y_test = self._temporal_train_test_split(X, y, meta)
+        self.fit(position, X_train, y_train, meta.loc[X_train.index])
+
+        # Evaluate the full pipeline on held-out weeks
+        held_out = self.predict_with_confidence(position, X_test)
+        y_pred = np.array([p['predicted_points'] for p in held_out])
         metrics = {
             'mae': mean_absolute_error(y_test, y_pred),
             'rmse': np.sqrt(mean_squared_error(y_test, y_pred)),
             'r2': r2_score(y_test, y_pred),
+            'coverage_80': interval_coverage(
+                y_test, [p['confidence_low'] for p in held_out], [p['confidence_high'] for p in held_out]
+            ),
             'samples': len(X),
-            'features': list(X.columns)
+            'test_samples': len(X_test),
+            'point_strategy': self.point_strategy[position],
+            'features': list(X.columns),
+            'refit_on_all_weeks': refit_full,
         }
+
+        logger.info(
+            f"{position.upper()} - MAE: {metrics['mae']:.2f}, RMSE: {metrics['rmse']:.2f}, "
+            f"R²: {metrics['r2']:.3f}, 80% range coverage: {metrics['coverage_80']:.1%}"
+        )
+
+        if refit_full:
+            self.fit(position, X, y, meta)
+            metrics['point_strategy'] = self.point_strategy[position]
+
         self.training_metrics[position] = metrics
-
-        logger.info(f"{position.upper()} - MAE: {metrics['mae']:.2f}, RMSE: {metrics['rmse']:.2f}, R²: {metrics['r2']:.3f}")
-
-        # Feature importance
-        importance = pd.DataFrame({
-            'feature': X.columns,
-            'importance': model.feature_importances_
-        }).sort_values('importance', ascending=False)
-
-        logger.info(f"Top 5 features for {position.upper()}:")
-        for _, row in importance.head().iterrows():
-            logger.info(f"  {row['feature']}: {row['importance']:.4f}")
-
-        self._is_trained = True
         return metrics
 
     def train_all_positions(self) -> Dict[str, Dict]:
@@ -423,6 +550,29 @@ class WeeklyPredictor:
             except Exception as e:
                 logger.error(f"Failed to train {position}: {e}")
         return all_metrics
+
+    def _point_predictions(self, position: str, X: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
+        """
+        Point predictions and how each was produced (see POINT_* constants).
+
+        Rows without a Sleeper projection always use the standalone model.
+        """
+        strategy = self.point_strategy.get(position, POINT_MODEL)
+        standalone_cols = [c for c in X.columns if c != SLEEPER_FEATURE]
+        points = self.models[position].predict(X[standalone_cols]).astype(float)
+        sources = np.full(len(X), POINT_MODEL, dtype=object)
+
+        if strategy != POINT_MODEL and SLEEPER_FEATURE in X.columns:
+            projection = X[SLEEPER_FEATURE].to_numpy(dtype=float)
+            has_projection = ~np.isnan(projection)
+            if has_projection.any():
+                points[has_projection] = projection[has_projection]
+                correction = self.correction_models.get(position)
+                if strategy == POINT_SLEEPER_CORRECTED and correction is not None:
+                    points[has_projection] += correction.predict(X[has_projection])
+                sources[has_projection] = strategy
+
+        return points, list(sources)
 
     def predict(self, position: str, features: pd.DataFrame) -> np.ndarray:
         """
@@ -440,41 +590,45 @@ class WeeklyPredictor:
             raise RuntimeError(f"No model trained for position: {position}")
 
         X = self._prepare_features(position, features)
-        return self.models[position].predict(X)
+        return self._point_predictions(position, X)[0]
 
     def predict_with_confidence(self, position: str, features: pd.DataFrame) -> List[Dict]:
         """
-        Make predictions with confidence intervals.
+        Make predictions with calibrated 80% ranges.
 
         Args:
             position: Player position
             features: DataFrame with feature columns
 
         Returns:
-            List of dicts with prediction, confidence_low, confidence_high
+            List of dicts with predicted_points, confidence_low, confidence_high,
+            and source (how the point prediction was produced)
         """
         position = position.lower()
         if position not in self.models:
             raise RuntimeError(f"No model trained for position: {position}")
 
         X = self._prepare_features(position, features)
+        points, sources = self._point_predictions(position, X)
 
-        # Get predictions
-        predictions = self.models[position].predict(X)
-        lower_bounds = self.quantile_models[position]['lower'].predict(X)
-        upper_bounds = self.quantile_models[position]['upper'].predict(X)
+        adjustment = self.interval_adjustment.get(position, 0.0)
+        lower_bounds = self.quantile_models[position]['lower'].predict(X) - adjustment
+        upper_bounds = self.quantile_models[position]['upper'].predict(X) + adjustment
 
         results = []
-        for i in range(len(predictions)):
-            point = float(predictions[i])
+        for i in range(len(points)):
+            point = float(points[i])
             # Bounds come from separate models and can cross the point estimate;
             # widen them so the range always contains the prediction.
             low = min(float(lower_bounds[i]), point)
             high = max(float(upper_bounds[i]), point)
             results.append({
                 'predicted_points': point,
-                'confidence_low': max(0.0, low),  # Can't be negative
+                # No floor at 0: PPR points go negative (kneel-downs, turnovers),
+                # and clipping broke the calibrated coverage for backup QBs
+                'confidence_low': low,
                 'confidence_high': high,
+                'source': sources[i],
             })
 
         return results
@@ -585,7 +739,7 @@ class WeeklyPredictor:
         )
 
     @staticmethod
-    def _feature_summary(row: Dict) -> Dict[str, object]:
+    def _feature_summary(row: Dict, source: str = POINT_MODEL) -> Dict[str, object]:
         """JSON-safe explanation fields; None means 'no data', never a fake 0."""
         return {
             'avg_3_games': _to_float(row.get('fantasy_pts_avg_3')),
@@ -594,7 +748,22 @@ class WeeklyPredictor:
             'opponent_rank': _to_float(row.get('opp_position_rank')),
             'boom_rate': _to_float(row.get('boom_rate_5')),
             'games_played_prior': _to_float(row.get('games_played_prior')),
+            'sleeper_projection': _to_float(row.get(SLEEPER_FEATURE)),
+            # How the point prediction was produced: sleeper | sleeper+model | model
+            'projection_source': source,
         }
+
+    def _get_projections(self, player_ids: List[str], season: int, week: int) -> Dict[str, float]:
+        """Sleeper's PPR projection for the week, by player_id (synced players only)."""
+        placeholders = ','.join(['%s'] * len(player_ids))
+        cursor = self.db_connection.cursor()
+        cursor.execute(f"""
+            SELECT player_id, projected_points_ppr
+            FROM player_projections
+            WHERE player_id IN ({placeholders})
+                AND season = %s AND week = %s AND source = 'sleeper'
+        """, (*player_ids, season, week))
+        return {row[0]: _to_float(row[1]) for row in cursor.fetchall()}
 
     def predict_week(self, player_ids: List[str], season: int, week: int,
                      position: str = None) -> List[WeeklyPrediction]:
@@ -617,6 +786,9 @@ class WeeklyPredictor:
 
         metadata = self._get_player_metadata(player_ids)
         features_df = self.get_player_features(player_ids, season, week, metadata)
+        if not features_df.empty:
+            projections = self._get_projections(player_ids, season, week)
+            features_df[SLEEPER_FEATURE] = features_df['player_id'].astype(str).map(projections)
         features_by_id = {
             str(row['player_id']): row
             for row in features_df.to_dict('records')
@@ -658,7 +830,7 @@ class WeeklyPredictor:
                     predicted_points=round(pred['predicted_points'], 1),
                     confidence_low=round(pred['confidence_low'], 1),
                     confidence_high=round(pred['confidence_high'], 1),
-                    features_used=self._feature_summary(row),
+                    features_used=self._feature_summary(row, pred['source']),
                 ))
 
         predicted.sort(key=lambda p: p.predicted_points, reverse=True)
@@ -675,6 +847,10 @@ class WeeklyPredictor:
             'training_metrics': self.training_metrics,
             'feature_columns': self.feature_columns,
             'missing_strategy': self.missing_strategy,
+            'point_strategy': self.point_strategy,
+            'correction_models': self.correction_models,
+            'interval_adjustment': self.interval_adjustment,
+            'calibration': self.calibration,
         }
 
         os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
@@ -710,6 +886,11 @@ class WeeklyPredictor:
         predictor.feature_columns = model_data.get('feature_columns', {})
         # Pickles saved before missing_strategy existed were trained on fillna(0)
         predictor.missing_strategy = model_data.get('missing_strategy', 'zero')
+        # Pickles from before Sleeper anchoring: standalone model, uncalibrated range
+        predictor.point_strategy = model_data.get('point_strategy', {})
+        predictor.correction_models = model_data.get('correction_models', {})
+        predictor.interval_adjustment = model_data.get('interval_adjustment', {})
+        predictor.calibration = model_data.get('calibration', {})
         predictor._is_trained = True
 
         logger.info(f"Weekly predictor loaded from {filepath}")
@@ -748,15 +929,7 @@ class WeeklyPredictor:
             if not train_mask.any() or not test_mask.any():
                 continue
 
-            model = XGBRegressor(
-                n_estimators=200,
-                learning_rate=0.05,
-                max_depth=4,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42,
-                n_jobs=-1
-            )
+            model = self._new_point_model()
             model.fit(X[train_mask], y[train_mask])
             y_pred = model.predict(X[test_mask])
             y_true = y[test_mask]

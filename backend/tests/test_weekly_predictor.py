@@ -176,6 +176,28 @@ class TestPredictWeekContract:
         assert pred['confidence_low'] <= pred['predicted_points'] <= pred['confidence_high']
 
 
+    @pytest.mark.unit
+    def test_range_can_go_below_zero(self):
+        """PPR points go negative (kneel-downs); a 0 floor broke backup-QB coverage."""
+        predictor = _predictor_with_models(point=0.5, low=-1.5, high=9.0)
+        features = pd.DataFrame([{'player_id': 'rb1', 'games_played_prior': 6}])
+
+        [pred] = predictor.predict_with_confidence('rb', features)
+
+        assert pred['confidence_low'] == pytest.approx(-1.5)
+
+    @pytest.mark.unit
+    def test_negative_projection_range_is_not_inverted(self):
+        """A 0 floor turned (-3, -0.5) around -1 into the inverted range (0, -0.5)."""
+        predictor = _predictor_with_models(point=-1.0, low=-3.0, high=-0.5)
+        features = pd.DataFrame([{'player_id': 'qb2', 'games_played_prior': 6}])
+
+        [pred] = predictor.predict_with_confidence('qb', features)
+
+        assert pred['confidence_low'] <= pred['predicted_points'] <= pred['confidence_high']
+        assert (pred['confidence_low'], pred['confidence_high']) == pytest.approx((-3.0, -0.5))
+
+
 class TestHasHistory:
     @pytest.mark.unit
     @pytest.mark.parametrize('features, expected', [
@@ -271,3 +293,93 @@ class TestGetPlayerFeatures:
         on_demand.assert_called_once()
         assert on_demand.call_args.args[0] == ['wr1']  # not rb1 (stored) or ghost (unknown)
         assert sorted(result['player_id']) == ['rb1', 'wr1']
+
+
+def _synthetic(signal: float, n_weeks=20, players=60, seed=0):
+    """Weekly rows where actual = Sleeper projection + signal * usage_shift + noise."""
+    rng = np.random.default_rng(seed)
+    n = n_weeks * players
+    meta = pd.DataFrame({'season': 2025, 'week': np.repeat(np.arange(1, n_weeks + 1), players)})
+    X = pd.DataFrame({
+        'fantasy_pts_avg_3': rng.normal(12, 4, n),
+        'usage_trend_3': rng.normal(0, 1, n),
+        'sleeper_proj': rng.uniform(4, 22, n),
+    })
+    y = X['sleeper_proj'] + signal * X['usage_trend_3'] + rng.normal(0, 3, n)
+    return X, pd.Series(y), meta
+
+
+class TestSleeperAnchoredFit:
+    @pytest.mark.unit
+    def test_keeps_sleeper_alone_when_features_add_nothing(self):
+        predictor = WeeklyPredictor()
+        X, y, meta = _synthetic(signal=0.0)
+
+        predictor.fit('rb', X, y, meta)
+
+        assert predictor.point_strategy['rb'] == 'sleeper'
+        assert predictor.correction_models['rb'] is None
+        np.testing.assert_allclose(predictor.predict('rb', X.head(5)), X['sleeper_proj'].head(5))
+
+    @pytest.mark.unit
+    def test_keeps_correction_when_features_carry_signal(self):
+        predictor = WeeklyPredictor()
+        X, y, meta = _synthetic(signal=4.0)
+
+        predictor.fit('rb', X, y, meta)
+
+        assert predictor.point_strategy['rb'] == 'sleeper+model'
+        assert predictor.calibration['rb']['sleeper+model']['mae'] < predictor.calibration['rb']['sleeper']['mae']
+
+    @pytest.mark.unit
+    def test_players_without_projection_fall_back_to_standalone_model(self):
+        predictor = WeeklyPredictor()
+        X, y, meta = _synthetic(signal=0.0)
+        predictor.fit('rb', X, y, meta)
+
+        rows = X.head(2).copy()
+        rows.loc[rows.index[1], 'sleeper_proj'] = np.nan
+        preds = predictor.predict_with_confidence('rb', rows)
+
+        assert [p['source'] for p in preds] == ['sleeper', 'model']
+        assert preds[0]['predicted_points'] == pytest.approx(rows['sleeper_proj'].iloc[0])
+
+    @pytest.mark.unit
+    def test_calibrated_range_reaches_target_coverage_on_new_weeks(self):
+        predictor = WeeklyPredictor()
+        X, y, meta = _synthetic(signal=0.0, n_weeks=30, seed=1)
+        train = meta['week'] <= 24
+        predictor.fit('rb', X[train], y[train], meta[train])
+
+        preds = predictor.predict_with_confidence('rb', X[~train])
+        inside = [p['confidence_low'] <= actual <= p['confidence_high']
+                  for p, actual in zip(preds, y[~train])]
+
+        assert np.mean(inside) == pytest.approx(0.80, abs=0.06)
+
+    @pytest.mark.unit
+    def test_legacy_pickle_uses_standalone_model_without_adjustment(self, tmp_path):
+        legacy = {'models': {}, 'quantile_models': {}, 'training_metrics': {}}
+        path = tmp_path / 'legacy.pkl'
+        path.write_bytes(pickle.dumps(legacy))
+
+        loaded = WeeklyPredictor.load(str(path))
+
+        assert loaded.point_strategy == {} and loaded.interval_adjustment == {}
+
+    @pytest.mark.unit
+    def test_predict_week_reports_projection_and_source(self):
+        predictor = WeeklyPredictor(db_connection=MagicMock())
+        X, y, meta = _synthetic(signal=0.0)
+        predictor.fit('rb', X, y, meta)
+        features = pd.DataFrame([{'player_id': 'rb1', 'games_played_prior': 6, 'fantasy_pts_avg_3': 14.0}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA), \
+             patch.object(predictor, 'get_player_features', return_value=features), \
+             patch.object(predictor, '_get_projections', return_value={'rb1': 16.5}):
+            [result] = predictor.predict_week(['rb1'], season=2025, week=6)
+
+        assert result.predicted_points == 16.5
+        assert result.features_used['sleeper_projection'] == 16.5
+        assert result.features_used['projection_source'] == 'sleeper'
+        assert result.confidence_low <= 16.5 <= result.confidence_high

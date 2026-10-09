@@ -412,12 +412,17 @@ class DataOrchestrator:
                 if not projections:
                     raise Exception("No projections data available")
 
+                # Same rule as stats: only players we track
+                known_ids = self._known_player_ids(conn)
                 cursor = conn.cursor()
 
                 for player_id, proj in projections.items():
+                    if player_id not in known_ids:
+                        continue
                     stats['processed'] += 1
 
                     try:
+                        cursor.execute("SAVEPOINT projection_insert")
                         cursor.execute("""
                             INSERT INTO player_projections (
                                 player_id, season, week, projected_points,
@@ -430,7 +435,15 @@ class DataOrchestrator:
                             )
                             ON CONFLICT (player_id, season, week, source) DO UPDATE SET
                                 projected_points = EXCLUDED.projected_points,
-                                projected_points_ppr = EXCLUDED.projected_points_ppr
+                                projected_points_ppr = EXCLUDED.projected_points_ppr,
+                                proj_passing_yards = EXCLUDED.proj_passing_yards,
+                                proj_passing_tds = EXCLUDED.proj_passing_tds,
+                                proj_rushing_yards = EXCLUDED.proj_rushing_yards,
+                                proj_rushing_tds = EXCLUDED.proj_rushing_tds,
+                                proj_receiving_yards = EXCLUDED.proj_receiving_yards,
+                                proj_receiving_tds = EXCLUDED.proj_receiving_tds,
+                                proj_receptions = EXCLUDED.proj_receptions
+                            RETURNING (xmax = 0) AS inserted
                         """, (
                             player_id, season, week,
                             proj.get('pts_std', 0),
@@ -444,13 +457,16 @@ class DataOrchestrator:
                             proj.get('rec', 0),
                             'sleeper'
                         ))
+                        result = cursor.fetchone()
+                        cursor.execute("RELEASE SAVEPOINT projection_insert")
 
-                        if cursor.rowcount == 1:
+                        if result and result[0]:
                             stats['inserted'] += 1
                         else:
                             stats['updated'] += 1
 
                     except Exception as e:
+                        cursor.execute("ROLLBACK TO SAVEPOINT projection_insert")
                         logger.warning(f"Error processing projection for {player_id}: {e}")
                         stats['errors'] += 1
 
