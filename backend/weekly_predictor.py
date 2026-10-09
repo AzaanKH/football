@@ -21,6 +21,7 @@ import os
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -690,9 +691,9 @@ class WeeklyPredictor:
         """
         The team each player was on in (season, week), from per-game stats:
         the team they played for that week; for a past week without a game
-        (bye, inactive), their nearest game before it, else the nearest after.
-        Players with no game that week or later are left out, so the current
-        team (players.team) applies, as it should for upcoming weeks.
+        (bye, inactive, out for the rest of the season), their nearest game
+        before it, else the nearest after. Upcoming weeks are left out, so the
+        current team (players.team) applies.
         """
         placeholders = ','.join(['%s'] * len(player_ids))
         cursor = self.db_connection.cursor()
@@ -706,13 +707,38 @@ class WeeklyPredictor:
             games.setdefault(player_id, {})[game_week] = team
 
         teams = {}
+        finished = None
         for player_id, by_week in games.items():
             if week in by_week:
                 teams[player_id] = by_week[week]
-            elif any(w > week for w in by_week):
+                continue
+            # A later game proves the week is past; otherwise ask the calendar
+            # (a player's last game of a season is not the season's last week)
+            past = any(w > week for w in by_week)
+            if not past:
+                if finished is None:
+                    finished = self._week_finished(season, week)
+                past = finished
+            if past:
                 before = [w for w in by_week if w < week]
                 teams[player_id] = by_week[max(before) if before else min(by_week)]
         return teams
+
+    def _week_finished(self, season: int, week: int, now: Optional[datetime] = None) -> bool:
+        """
+        Whether every game of (season, week) is over: its last kickoff (synced
+        schedule) plus GAME_DURATION has passed, as in data_pipeline.season.
+        Without a synced schedule, from the date estimate: the Tuesday after
+        the week's Thursday has passed.
+        """
+        from data_pipeline.season import GAME_DURATION, schedule_week_end, season_opener
+
+        now = now or datetime.now(timezone.utc)
+        end = schedule_week_end(self.db_connection)(season, week)
+        if end is not None:
+            return now >= end + GAME_DURATION
+        week_tuesday = season_opener(season) + timedelta(days=7 * (week - 1) + 5)
+        return now.date() > week_tuesday
 
     @staticmethod
     def _game_context(meta: Dict, schedule: Dict) -> Dict[str, object]:
