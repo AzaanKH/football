@@ -413,6 +413,56 @@ class TestGameContext:
         assert by_id['rb_rookie'].context['team'] == 'NYG'
 
     @pytest.mark.unit
+    def test_past_week_uses_the_team_the_player_was_on(self):
+        """Traded NYG -> PHI later: week 5 shows PHI's game, not a bye from NYG's schedule."""
+        predictor = _predictor_with_models()
+        features = pd.DataFrame([{'player_id': 'rb_rookie', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=METADATA),              patch.object(predictor, '_get_week_teams', return_value={'rb_rookie': 'PHI'}),              patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE),              patch.object(predictor, 'get_player_features', return_value=features) as get_features:
+            [result] = predictor.predict_week(['rb_rookie'], season=2025, week=5)
+
+        assert result.status == 'ok'
+        assert (result.context['team'], result.context['opponent']) == ('PHI', 'DAL')
+        # On-demand features get the same team
+        assert get_features.call_args.args[3]['rb_rookie']['team'] == 'PHI'
+
+    @pytest.mark.unit
+    def test_bye_follows_the_team_as_of_that_week(self):
+        """Now on PHI (who played), but on NYG then, and NYG had no game: a real bye."""
+        predictor = _predictor_with_models()
+        metadata = {'rb1': {**METADATA['rb1']}}
+        features = pd.DataFrame([{'player_id': 'rb1', 'games_played_prior': 6}])
+
+        with patch.object(predictor, '_get_player_metadata', return_value=metadata),              patch.object(predictor, '_get_week_teams', return_value={'rb1': 'NYG'}),              patch.object(predictor, '_get_schedule', return_value=self.SCHEDULE),              patch.object(predictor, 'get_player_features', return_value=features):
+            [result] = predictor.predict_week(['rb1'], season=2025, week=5)
+
+        assert result.reason == 'bye'
+        assert result.context['team'] == 'NYG'
+
+    @staticmethod
+    def _week_teams(rows, week):
+        predictor = _predictor_with_models()
+        predictor.db_connection.cursor.return_value.fetchall.return_value = rows
+        return predictor._get_week_teams(['p'], 2025, week)
+
+    @pytest.mark.unit
+    def test_week_team_is_the_game_that_week(self):
+        rows = [('p', 4, 'NYG'), ('p', 5, 'PHI'), ('p', 6, 'PHI')]
+        assert self._week_teams(rows, 5) == {'p': 'PHI'}
+
+    @pytest.mark.unit
+    def test_week_team_for_a_missed_past_week_is_the_nearest_game_before(self):
+        rows = [('p', 3, 'NYG'), ('p', 4, 'NYG'), ('p', 7, 'PHI')]  # traded during weeks 5-6
+        assert self._week_teams(rows, 5) == {'p': 'NYG'}
+        # Nothing before (missed the start of the season): the nearest game after
+        assert self._week_teams([('p', 7, 'PHI')], 2) == {'p': 'PHI'}
+
+    @pytest.mark.unit
+    def test_upcoming_week_keeps_the_current_team(self):
+        rows = [('p', 3, 'NYG'), ('p', 4, 'NYG')]
+        assert self._week_teams(rows, 5) == {}
+
+    @pytest.mark.unit
     def test_no_bye_for_player_who_played_that_week(self):
         """A past week: the current team (NYG) had a bye, but the player played for another team."""
         predictor = _predictor_with_models()

@@ -228,8 +228,12 @@ defense's last 8 games, rank 1 = toughest), not from `team_defense_stats`.
   by the model: tested in `evaluation.py` (2025 W7 - 2026 W3) they did not
   beat Sleeper's projection for any position (Sleeper already prices in
   matchup and role), and for QB they made the correction worse.
-- For upcoming weeks, the opponent/bye comes from the player's *current*
-  team (`players.team`); finished weeks use the team they actually played for.
+- Opponent/bye use the player's team *as of the requested week*
+  (`WeeklyPredictor._get_week_teams`): the team they played for that week;
+  for a past week they missed, their nearest game before it (else after);
+  otherwise, as for upcoming weeks, the current team (`players.team`). A
+  trade between the last game and an upcoming week is only reflected once
+  the players sync picks it up.
 - Injury status is current-only; the UI shows it only for the current week.
 - Ranges are not floored at 0: PPR points go negative (kneel-downs,
   turnovers), and a 0 floor had pulled backup-QB coverage down (QB 75% ->
