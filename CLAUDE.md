@@ -87,6 +87,7 @@ python evaluation.py [qb rb wr]       # model vs 3/5-game avg vs Sleeper
 python export_static.py [--seasons 2025 2026]   # -> frontend public/data/
 python export_static.py --verify                 # export vs /predict_week
 ./scripts/deploy.ps1 -Site <site> [-Prod]        # export, test, build, Netlify deploy
+./scripts/publish-data.ps1 [-PrepareOnly]       # export, verify, GitHub Release snapshot
 
 # Tests
 python -m pytest -m unit              # fast, no DB/network
@@ -95,8 +96,12 @@ python run_tests.py e2e               # real Sleeper + football_test DB
 # Frontend
 cd football/frontend/fantasy-football
 npm start                             # Vite dev server, :3000
-npm test                              # Vitest (jsdom)
+npm test                              # Vitest (jsdom) + Node snapshot tests
 npm run build                         # -> build/
+npm run build:site                    # download/validate snapshot, then build (hosting)
+npm run build:local                   # validate local export, then build
+npm run data:pack                     # -> backend/snapshots/predictions.json.gz (ignored)
+npm run cloudflare:update             # apply cloudflare/pages.json using pinned cf CLI
 npm run preview
 ```
 

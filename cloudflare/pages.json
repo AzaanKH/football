@@ -1,0 +1,45 @@
+{
+  "name": "football-start-sit",
+  "production_branch": "main",
+  "build_config": {
+    "root_dir": "frontend/fantasy-football",
+    "build_command": "npm run build:site",
+    "destination_dir": "build",
+    "build_caching": true
+  },
+  "source": {
+    "type": "github",
+    "config": {
+      "owner": "AzaanKH",
+      "owner_id": "106739295",
+      "repo_name": "football",
+      "repo_id": "826155320",
+      "production_branch": "main",
+      "production_deployments_enabled": true,
+      "preview_deployment_setting": "all",
+      "pr_comments_enabled": false
+    }
+  },
+  "deployment_configs": {
+    "production": {
+      "build_image_major_version": 3,
+      "env_vars": {
+        "NODE_VERSION": { "type": "plain_text", "value": "24" },
+        "PREDICTIONS_SNAPSHOT_URL": {
+          "type": "plain_text",
+          "value": "https://github.com/AzaanKH/football/releases/download/prediction-data/predictions.json.gz"
+        }
+      }
+    },
+    "preview": {
+      "build_image_major_version": 3,
+      "env_vars": {
+        "NODE_VERSION": { "type": "plain_text", "value": "24" },
+        "PREDICTIONS_SNAPSHOT_URL": {
+          "type": "plain_text",
+          "value": "https://github.com/AzaanKH/football/releases/download/prediction-data/predictions.json.gz"
+        }
+      }
+    }
+  }
+}
