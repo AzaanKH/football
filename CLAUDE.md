@@ -86,6 +86,7 @@ python evaluation.py [qb rb wr]       # model vs 3/5-game avg vs Sleeper
 # Static export (what the frontend reads)
 python export_static.py [--seasons 2025 2026]   # -> frontend public/data/
 python export_static.py --verify                 # export vs /predict_week
+./scripts/deploy.ps1 -Site <site> [-Prod]        # export, test, build, Netlify deploy
 
 # Tests
 python -m pytest -m unit              # fast, no DB/network

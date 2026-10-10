@@ -150,6 +150,22 @@ than a week old. Seasons and weeks shown are the ones exported.
 Frontend tests: `npm test` (Vitest). Production build: `npm run build`
 (output in `build/`), preview it with `npm run preview`.
 
+### Deploy (Netlify)
+
+`scripts/deploy.ps1` exports the predictions, verifies a sample against
+`/predict_week`, runs the frontend tests, builds, and uploads `build/` with
+the Netlify CLI (`npm install -g netlify-cli`, then `netlify login`). The
+database and model stay local; only the static site is uploaded.
+
+```powershell
+./scripts/deploy.ps1 -Site <netlify-site>          # draft deploy (preview URL)
+./scripts/deploy.ps1 -Site <netlify-site> -Prod    # publish to the live site
+#   -Seasons 2025,2026   -SkipExport   -VerifySamples 0
+```
+
+Set `$env:NETLIFY_SITE_ID` to skip `-Site`. Re-run after each weekly
+sync/retrain to publish fresh predictions.
+
 ### 7. Open the app
 
 Navigate to <http://localhost:3000>
