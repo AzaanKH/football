@@ -7,16 +7,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { PlayerCombobox } from './components/ui/player-combobox';
 import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { RangeField } from './components/range-field';
+import { PlayerCutout, PlayerPhoto } from './components/player-photo';
 
 import {
   errorMessage,
-  getModelStatus,
   getSeasons,
   getWeeks,
   isCancel,
   predictWeek,
 } from './lib/api';
 import { buildRequest, isStale, requestKey } from './lib/predictionState';
+import { cn } from './lib/utils';
 
 const POSITIONS = [
   { value: 'qb', short: 'QB', label: 'Quarterbacks' },
@@ -35,7 +36,45 @@ const dateFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'nu
 const formatTime = (iso) => (iso ? timeFormat.format(new Date(iso)) : null);
 const formatDate = (iso) => (iso ? dateFormat.format(new Date(iso)) : null);
 
-/** The decision the comparison supports, in one line. */
+// Saved predictions older than this get a "may be out of date" note
+const STALE_EXPORT_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * What the saved data covers and how fresh it is, for the intro screen.
+ * `now` is injectable for tests.
+ */
+export function dataSummary(data, now = Date.now()) {
+  if (!data?.seasons.length) return null;
+  const first = data.seasons[data.seasons.length - 1];
+  const last = data.seasons[0];
+  const lines = [
+    `Saved predictions for the ${first === last ? first : `${first}-${last}`} `
+      + `season${first === last ? '' : 's'}, exported ${formatTime(data.exportedAt)}.`,
+  ];
+  if (data.statsThrough) {
+    lines.push(`Stats through ${data.statsThrough.season} week ${data.statsThrough.week}.`);
+  }
+  const current = data.currentWeek;
+  if (current && !data.currentWeekSaved) {
+    lines.push(`Week ${current.week} of ${current.season} hasn't been exported yet.`);
+  }
+  const ageDays = Math.floor((now - new Date(data.exportedAt).getTime()) / DAY_MS);
+  let warning = null;
+  if (data.weekRolledOver && data.exportedWeek) {
+    // The NFL week moved on since the export: projections and injuries predate it
+    warning = `These predictions were saved during week ${data.exportedWeek.week}, which has finished, `
+      + 'so projections and injury news may be out of date.';
+  } else if (ageDays >= STALE_EXPORT_DAYS) {
+    warning = `These predictions were saved ${ageDays} days ago and may be out of date.`;
+  }
+  return { text: lines.join(' '), warning };
+}
+
+/**
+ * The decision the comparison supports, in one line, and the players it
+ * names (pictured above the headline).
+ */
 function verdict(predictions) {
   const [first, second] = predictions;
   if (!first) return null;
@@ -43,6 +82,7 @@ function verdict(predictions) {
     return {
       title: `${first.playerName} projects ${first.predictedPoints.toFixed(1)} points`,
       detail: 'Add another player to compare.',
+      featured: [first],
     };
   }
   const gap = first.predictedPoints - second.predictedPoints;
@@ -50,11 +90,13 @@ function verdict(predictions) {
     return {
       title: `Close call: ${first.playerName} or ${second.playerName}`,
       detail: `Only ${gap.toFixed(1)} points apart, and their ranges overlap.`,
+      featured: [first, second],
     };
   }
   return {
     title: `Start ${first.playerName}`,
     detail: `Projects ${gap.toFixed(1)} more points than ${second.playerName}.`,
+    featured: [first],
   };
 }
 
@@ -69,6 +111,8 @@ function Freshness({ result }) {
   if (freshness.stats_through) {
     lines.push(`Stats through ${freshness.stats_through.season} week ${freshness.stats_through.week}.`);
   }
+  const saved = formatTime(result.exportedAt);
+  if (saved) lines.push(`Predictions saved ${saved}.`);
   const players = formatDate(freshness.players_synced_at);
   if (players) lines.push(`Player and injury info from ${players}.`);
   const isCurrent = currentWeek
@@ -99,21 +143,20 @@ const App = () => {
   const [isLoadingPredictions, setIsLoadingPredictions] = useState(false);
   const [error, setError] = useState(null);
   const [setupError, setSetupError] = useState(null);
-  const [systemStatus, setSystemStatus] = useState(null);
+  // What the saved predictions cover and when they were exported
+  const [dataInfo, setDataInfo] = useState(null);
   const inFlight = useRef(null); // {controller, key} of the pending prediction request
 
-  // Check system status and load seasons on mount; the default season comes from the data
+  // Load the saved seasons on mount; the default season comes from the data
   useEffect(() => {
-    getModelStatus()
-      .then(setSystemStatus)
-      .catch((err) => console.error('Error checking status:', err));
-
     getSeasons()
       .then((data) => {
+        setDataInfo(data);
         setSeasons(data.seasons);
         setSeason(data.default);
+        if (!data.seasons.length) setSetupError('No predictions have been saved yet.');
       })
-      .catch(() => setSetupError("Can't reach the prediction server. Start the backend, then reload."));
+      .catch((err) => setSetupError(errorMessage(err, "Couldn't load the saved predictions. Try reloading.")));
   }, []);
 
   // Load weeks for the season; default to the latest week with data
@@ -127,10 +170,10 @@ const App = () => {
         setWeek((current) =>
           weeks.some((w) => w.week === current) ? current : weeks[weeks.length - 1]?.week ?? null
         );
-        setSetupError(weeks.length ? null : `No prediction data for the ${season} season yet.`);
+        setSetupError(weeks.length ? null : `No saved predictions for the ${season} season.`);
       })
       .catch((err) => {
-        if (!isCancel(err)) setSetupError(`Couldn't load the weeks for ${season}. Try reloading.`);
+        if (!isCancel(err)) setSetupError(errorMessage(err, `Couldn't load the saved weeks for ${season}. Try reloading.`));
       });
 
     return () => controller.abort();
@@ -199,11 +242,13 @@ const App = () => {
         unavailable: data.unavailable || [],
         freshness: data.freshness,
         currentWeek: data.current_week,
+        injuryStatusCurrent: data.injury_status_current,
+        exportedAt: dataInfo?.exportedAt,
       });
     } catch (err) {
       if (isCancel(err)) return;
-      console.error('Error fetching predictions:', err);
-      setError(errorMessage(err, "Couldn't get predictions. Check that the backend is running, then try again."));
+      console.error('Error loading predictions:', err);
+      setError(errorMessage(err, `Couldn't load the saved predictions for week ${request.week}. Try again.`));
     } finally {
       if (inFlight.current?.controller === controller) {
         inFlight.current = null;
@@ -219,12 +264,14 @@ const App = () => {
   const selectedIds = players.filter(Boolean).map((p) => p.player_id);
   const ready = season != null && week != null;
   const call = verdict(predictions);
+  // Statuses are from the export: shown only for the current week, while it still is
   const showInjuries = Boolean(
-    result?.currentWeek
+    result?.injuryStatusCurrent
+    && result.currentWeek
     && result.currentWeek.season === result.request.season
     && result.currentWeek.week === result.request.week
   );
-  const modelDown = systemStatus && !systemStatus.weekly_predictor_available;
+  const summary = dataSummary(dataInfo);
 
   return (
     <div className="min-h-screen bg-turf text-chalk">
@@ -349,10 +396,9 @@ const App = () => {
               {setupError}
             </p>
           )}
-          {modelDown && (
-            <p className="mb-6 rounded-md border border-flag/60 px-4 py-3 text-sm text-chalk">
-              Predictions are unavailable until the model is trained
-              (<code className="text-chalk-secondary">python weekly_predictor.py train</code>).
+          {summary?.warning && (
+            <p role="status" className="mb-6 rounded-md border border-flag/60 px-4 py-3 text-sm text-chalk">
+              {summary.warning}
             </p>
           )}
 
@@ -380,7 +426,19 @@ const App = () => {
               <p className="font-condensed text-lg text-chalk-secondary">
                 Week {resultWeek}, {result.request.season}
               </p>
-              <h2 id="results-title" className="mb-1 font-condensed text-verdict font-bold leading-tight text-balance">
+              {/* The named players stand on a yard line; a close call shows both, same size */}
+              {call && (
+                <div className="mt-1 flex w-fit items-end border-b border-yardline">
+                  {call.featured.map((p, i) => (
+                    <PlayerCutout
+                      key={p.playerId}
+                      playerId={p.playerId}
+                      className={cn('h-24 sm:h-32', i > 0 && '-ml-6 sm:-ml-8')}
+                    />
+                  ))}
+                </div>
+              )}
+              <h2 id="results-title" className="mb-1 mt-3 font-condensed text-verdict font-bold leading-tight text-balance">
                 {call ? call.title : 'No players could be projected'}
               </h2>
               {call && <p className="mb-8 text-pretty text-chalk-secondary">{call.detail}</p>}
@@ -398,8 +456,11 @@ const App = () => {
                   <h3 className="mb-2 font-condensed text-xl font-semibold">Not projected</h3>
                   <ul className="divide-y divide-yardline border-y border-yardline">
                     {unavailable.map((player) => (
-                      <li key={player.player_id} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 py-2">
-                        <span className="text-chalk">{player.player_name || player.player_id}</span>
+                      <li key={player.player_id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2">
+                        <span className="flex items-center gap-2 text-chalk">
+                          <PlayerPhoto playerId={player.player_id} name={player.player_name} size="sm" muted />
+                          {player.player_name || player.player_id}
+                        </span>
                         <span className="text-sm text-chalk-secondary">
                           {player.reason === 'bye' ? 'Bye week' : player.message}
                         </span>
@@ -420,6 +481,9 @@ const App = () => {
                 Pick the players you're deciding between, then compare them. You'll see each
                 one's projected PPR points and the range they usually land in.
               </p>
+              {summary && (
+                <p className="mt-4 text-pretty text-sm text-chalk-muted">{summary.text}</p>
+              )}
             </div>
           )}
         </section>

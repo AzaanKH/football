@@ -126,21 +126,45 @@ cd backend
 python app.py
 ```
 
-### 6. Start the frontend
+### 6. Export predictions and start the frontend
+
+The frontend doesn't call the API: it reads predictions exported as static
+JSON into `frontend/fantasy-football/public/data/`, so the built site can be
+hosted anywhere while Python and PostgreSQL stay on your computer.
 
 ```bash
-cd frontend/fantasy-football
+cd backend
+python export_static.py                     # every season with features (~40 s)
+python export_static.py --seasons 2025 2026 # only these seasons
+python export_static.py --verify            # compare the export with /predict_week
+
+cd ../frontend/fantasy-football
 npm install
 npm start          # Vite dev server on http://localhost:3000
 ```
 
-The frontend calls `http://localhost:5001` by default. To point it elsewhere,
-set `VITE_API_BASE` (e.g. in `frontend/fantasy-football/.env.local`;
-`REACT_APP_API_BASE` still works). The season and weeks shown come from the
-data the backend has.
+Re-run the export after each sync/retrain (and rebuild the site) to publish
+fresh predictions; the app shows when they were saved and flags exports more
+than a week old. Seasons and weeks shown are the ones exported.
 
 Frontend tests: `npm test` (Vitest). Production build: `npm run build`
 (output in `build/`), preview it with `npm run preview`.
+
+### Deploy (Netlify)
+
+`scripts/deploy.ps1` exports the predictions, verifies a sample against
+`/predict_week`, runs the frontend tests, builds, and uploads `build/` with
+the Netlify CLI (`npm install -g netlify-cli`, then `netlify login`). The
+database and model stay local; only the static site is uploaded.
+
+```powershell
+./scripts/deploy.ps1 -Site <netlify-site>          # draft deploy (preview URL)
+./scripts/deploy.ps1 -Site <netlify-site> -Prod    # publish to the live site
+#   -Seasons 2025,2026   -SkipExport   -VerifySamples 0
+```
+
+Set `$env:NETLIFY_SITE_ID` to skip `-Site`. Re-run after each weekly
+sync/retrain to publish fresh predictions.
 
 ### 7. Open the app
 

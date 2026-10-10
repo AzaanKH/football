@@ -81,6 +81,21 @@ def estimate_state(today: date) -> Dict:
     return {'season': season, 'week': REGULAR_SEASON_WEEKS, 'season_type': 'post'}
 
 
+def week_finished_at(season: int, week: int,
+                     week_end_lookup: Optional[Callable[[int, int], Optional[datetime]]] = None
+                     ) -> datetime:
+    """
+    When every game of (season, week) is over: its last kickoff (synced
+    schedule) plus GAME_DURATION; without a synced schedule, the date
+    estimate (the start of the Wednesday after the week's Thursday, UTC).
+    """
+    end = week_end_lookup(season, week) if week_end_lookup else None
+    if end is not None:
+        return end + GAME_DURATION
+    week_wednesday = season_opener(season) + timedelta(days=7 * (week - 1) + 6)
+    return datetime(week_wednesday.year, week_wednesday.month, week_wednesday.day, tzinfo=timezone.utc)
+
+
 def schedule_state(season: int, now: datetime,
                    week_end_lookup: Callable[[int, int], Optional[datetime]]) -> Optional[Dict]:
     """

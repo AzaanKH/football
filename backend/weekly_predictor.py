@@ -21,7 +21,7 @@ import os
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -726,19 +726,14 @@ class WeeklyPredictor:
 
     def _week_finished(self, season: int, week: int, now: Optional[datetime] = None) -> bool:
         """
-        Whether every game of (season, week) is over: its last kickoff (synced
-        schedule) plus GAME_DURATION has passed, as in data_pipeline.season.
-        Without a synced schedule, from the date estimate: the Tuesday after
-        the week's Thursday has passed.
+        Whether every game of (season, week) is over
+        (data_pipeline.season.week_finished_at: last kickoff plus
+        GAME_DURATION, else the date estimate).
         """
-        from data_pipeline.season import GAME_DURATION, schedule_week_end, season_opener
+        from data_pipeline.season import schedule_week_end, week_finished_at
 
         now = now or datetime.now(timezone.utc)
-        end = schedule_week_end(self.db_connection)(season, week)
-        if end is not None:
-            return now >= end + GAME_DURATION
-        week_tuesday = season_opener(season) + timedelta(days=7 * (week - 1) + 5)
-        return now.date() > week_tuesday
+        return now >= week_finished_at(season, week, schedule_week_end(self.db_connection))
 
     @staticmethod
     def _game_context(meta: Dict, schedule: Dict) -> Dict[str, object]:

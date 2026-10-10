@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Ban } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { PlayerPhoto } from './player-photo';
 
 // How each point prediction was produced (backend `projection_source`)
 export const SOURCE_LABELS = {
@@ -86,17 +87,20 @@ function PlayerLine({ p, showInjury }) {
   const matchup = matchupLabel(p.context);
   const kickoff = kickoffLabel(p.context);
   return (
-    <div className="min-w-0">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="truncate font-condensed text-lg font-semibold leading-tight text-chalk">
-          {p.playerName}
-        </span>
-        {showInjury && <InjuryChip status={p.context?.injury_status} />}
-      </div>
-      <div className="flex flex-wrap gap-x-3 text-sm text-chalk-secondary">
-        {p.context?.team && <span>{p.context.team}</span>}
-        {matchup && <span>{matchup}</span>}
-        {kickoff && <span>{kickoff}</span>}
+    <div className="flex min-w-0 items-center gap-3">
+      <PlayerPhoto playerId={p.playerId} name={p.playerName} />
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="truncate font-condensed text-lg font-semibold leading-tight text-chalk">
+            {p.playerName}
+          </span>
+          {showInjury && <InjuryChip status={p.context?.injury_status} />}
+        </div>
+        <div className="flex flex-wrap gap-x-3 text-sm text-chalk-secondary">
+          {p.context?.team && <span>{p.context.team}</span>}
+          {matchup && <span>{matchup}</span>}
+          {kickoff && <span>{kickoff}</span>}
+        </div>
       </div>
     </div>
   );
@@ -145,8 +149,11 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
               {predictions.map((p) => (
                 <tr key={p.playerId} className="border-b border-yardline/60">
                   <th scope="row" className="py-2 pr-4 font-medium text-chalk">
-                    {p.playerName}
-                    {showInjuries && <span className="ml-2"><InjuryChip status={p.context?.injury_status} /></span>}
+                    <span className="flex items-center gap-2">
+                      <PlayerPhoto playerId={p.playerId} name={p.playerName} size="sm" />
+                      {p.playerName}
+                      {showInjuries && <InjuryChip status={p.context?.injury_status} />}
+                    </span>
                   </th>
                   <td className="py-2 pr-4 text-chalk-secondary">
                     {[p.context?.team, matchupLabel(p.context), kickoffLabel(p.context)].filter(Boolean).join(' ')}
@@ -167,7 +174,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
         <div key={animationKey}>
           {/* Yard markers */}
           {/* Same columns and padding as the rows below, so markers align with bands */}
-          <div aria-hidden="true" className="grid grid-cols-[1fr_3.5rem] gap-x-4 px-2 @lg:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem]">
+          <div aria-hidden="true" className="grid grid-cols-[1fr_3.5rem] gap-x-4 px-2 @lg:grid-cols-[minmax(11rem,15rem)_1fr_3.5rem]">
             <span className="hidden @lg:block" />
             <div className="relative h-6 font-condensed text-sm font-semibold text-chalk-muted">
               {ticks.map((value) => (
@@ -198,7 +205,7 @@ export function RangeField({ predictions, showInjuries = false, animationKey }) 
                   onFocus={() => setActive(p.playerId)}
                   onBlur={() => setActive(null)}
                   className={cn(
-                    'grid grid-cols-[1fr_3.5rem] gap-x-4 gap-y-2 rounded-md px-2 py-3 @lg:grid-cols-[minmax(9rem,13rem)_1fr_3.5rem] @lg:items-center',
+                    'grid grid-cols-[1fr_3.5rem] gap-x-4 gap-y-2 rounded-md px-2 py-3 @lg:grid-cols-[minmax(11rem,15rem)_1fr_3.5rem] @lg:items-center',
                     isActive && 'bg-sideline/70'
                   )}
                 >

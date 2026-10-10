@@ -249,3 +249,14 @@ class TestSetupPlan:
 
         assert plan[2025]['stats'] == list(range(1, 19))
         assert pairs[0] == (2025, 1) and (2026, 1) in pairs and (2026, 2) in pairs
+
+
+@pytest.mark.unit
+def test_week_finished_at_uses_the_last_kickoff_else_the_wednesday_after():
+    from data_pipeline.season import week_finished_at
+
+    kickoff = datetime(2026, 10, 12, 0, 15, tzinfo=timezone.utc)
+    assert week_finished_at(2026, 5, lambda s, w: kickoff) == datetime(2026, 10, 12, 4, 15, tzinfo=timezone.utc)
+    # 2026 opens Thursday Sep 10: week 5 is Oct 8-12, done by Wednesday Oct 14
+    assert week_finished_at(2026, 5, lambda s, w: None) == datetime(2026, 10, 14, tzinfo=timezone.utc)
+    assert week_finished_at(2026, 5) == datetime(2026, 10, 14, tzinfo=timezone.utc)

@@ -8,7 +8,7 @@ export default defineConfig({
   server: { port: 3000 },
   preview: { port: 3000 },
   build: { outDir: 'build' },
-  // VITE_API_BASE is the new name; REACT_APP_API_BASE keeps older .env files working
+  // Env vars exposed to the app (REACT_APP_ kept for older .env files)
   envPrefix: ['VITE_', 'REACT_APP_'],
   test: {
     environment: 'jsdom',
