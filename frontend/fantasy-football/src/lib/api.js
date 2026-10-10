@@ -72,20 +72,49 @@ function getWeekFile({ season, week, position }, signal) {
 }
 
 /**
- * Seasons with saved predictions, newest first, the default to show, and
- * when the export was made.
+ * Which NFL week is current right now, from the export.
+ *
+ * The week current at export time stays current until its `expires_at`
+ * (its last game finished). After that the export has rolled over: the
+ * current week is the first one in the exported calendar that hasn't
+ * finished (the backend's data_pipeline/season.py rule), or null once the
+ * regular season is over. Exports without an expiry (older files, or
+ * outside the regular season) keep the exported week.
+ */
+export function weekStatus(index, now = Date.now()) {
+  const exported = index.current_week ?? null;
+  const expiresAt = exported?.expires_at ? Date.parse(exported.expires_at) : NaN;
+  if (!exported || Number.isNaN(expiresAt) || now < expiresAt) {
+    return { currentWeek: exported, exportedWeek: exported, rolledOver: false };
+  }
+  const calendar = index.calendar?.season === exported.season ? index.calendar.weeks : [];
+  const next = calendar.find((w) => now < Date.parse(w.finished_at));
+  return {
+    currentWeek: next ? { season: exported.season, week: next.week, season_type: 'regular' } : null,
+    exportedWeek: exported,
+    rolledOver: true,
+  };
+}
+
+const isSaved = (index, week) => Boolean(week) && index.seasons.some(
+  (s) => s.season === week.season && s.weeks.some((w) => w.week === week.week)
+);
+
+/**
+ * Seasons with saved predictions, newest first, the default to show, when
+ * the export was made, and where the NFL calendar is now.
  */
 export async function getSeasons() {
   const index = await getIndex();
-  const current = index.current_week;
+  const { currentWeek, exportedWeek, rolledOver } = weekStatus(index);
   return {
     seasons: index.seasons.map((s) => s.season),
     default: index.default_season,
-    currentWeek: current,
-    // Whether the NFL week that was current at export time was saved
-    currentWeekSaved: Boolean(current) && index.seasons.some(
-      (s) => s.season === current.season && s.weeks.some((w) => w.week === current.week)
-    ),
+    currentWeek,
+    currentWeekSaved: isSaved(index, currentWeek),
+    // The week current at export time, and whether it has finished since
+    exportedWeek,
+    weekRolledOver: rolledOver,
     exportedAt: index.exported_at,
     statsThrough: index.stats_through,
   };
@@ -116,7 +145,11 @@ export async function searchPlayers({ position, season, week, search, limit = SE
  * predictions highest first, then unavailable players in request order.
  */
 export async function predictWeek({ position, playerIds, week, season }, signal) {
-  const file = await getWeekFile({ season, week, position }, signal);
+  const [file, index] = await Promise.all([
+    getWeekFile({ season, week, position }, signal),
+    withSignal(getIndex(), signal),
+  ]);
+  const { currentWeek, rolledOver } = weekStatus(index);
   const predictions = new Map(file.predictions.map((p) => [p.player_id, p]));
   const unavailable = new Map(file.unavailable.map((p) => [p.player_id, p]));
 
@@ -139,6 +172,8 @@ export async function predictWeek({ position, playerIds, week, season }, signal)
         message: 'No saved prediction for this player this week.',
       }),
     freshness: file.freshness,
-    current_week: file.current_week,
+    current_week: currentWeek,
+    // Injury statuses were captured at export time: current only until that week ends
+    injury_status_current: !rolledOver,
   };
 }

@@ -38,7 +38,7 @@ const FRESHNESS = {
 
 const response = (predictions, extra = {}) => ({
   predictions, unavailable: [], freshness: FRESHNESS,
-  current_week: { season: 2026, week: 5 }, ...extra,
+  current_week: { season: 2026, week: 5 }, injury_status_current: true, ...extra,
 });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -48,6 +48,8 @@ const savedData = (extra = {}) => ({
   default: 2025,
   currentWeek: { season: 2025, week: 7 },
   currentWeekSaved: true,
+  exportedWeek: { season: 2025, week: 7 },
+  weekRolledOver: false,
   exportedAt: new Date(Date.now() - DAY_MS).toISOString(),
   statsThrough: { season: 2025, week: 6 },
   ...extra,
@@ -252,6 +254,34 @@ test('shows injury status only when the result is for the current week, and says
   expect(screen.getByText(/stats through 2025 week 18/i)).toBeInTheDocument();
   expect(screen.getByText(/predictions saved/i)).toBeInTheDocument();
   expect(screen.getByText(/all points are ppr/i)).toBeInTheDocument();
+});
+
+test('warns when the NFL week has moved on since the export', async () => {
+  api.getSeasons.mockResolvedValue(savedData({
+    exportedAt: new Date(Date.now() - 2 * DAY_MS).toISOString(), // younger than the 7-day warning
+    currentWeek: { season: 2025, week: 8 },
+    currentWeekSaved: false,
+    weekRolledOver: true,
+  }));
+  await renderReady();
+
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'These predictions were saved during week 7, which has finished, so projections and injury news may be out of date.'
+  );
+  expect(screen.getByText(/week 8 of 2025 hasn't been exported yet/i)).toBeInTheDocument();
+});
+
+test('hides saved injury statuses once their week has finished', async () => {
+  const user = userEvent.setup();
+  api.predictWeek.mockResolvedValue(response([prediction(PLAYERS[0], 19.6)], {
+    current_week: { season: 2025, week: 7 }, injury_status_current: false,
+  }));
+  await renderReady();
+  await selectPlayer(user, 'Derrick Henry');
+  await user.click(predictButton());
+
+  await screen.findByRole('heading', { name: 'Derrick Henry projects 19.6 points' });
+  expect(screen.queryByText('Questionable')).not.toBeInTheDocument();
 });
 
 test('shows the injury chip for the current week', async () => {

@@ -113,6 +113,68 @@ def build_week_file(season: int, week: int, position: str, players: List[Dict],
     }
 
 
+def season_calendar(conn, season: int) -> Dict:
+    """
+    When each regular-season week of `season` counts as finished (UTC), so
+    the frontend can tell which week is current long after the export,
+    with the same rule as data_pipeline.season.
+    """
+    from data_pipeline.season import REGULAR_SEASON_WEEKS, schedule_week_end, week_finished_at
+
+    lookup = schedule_week_end(conn)
+    return {
+        'season': season,
+        'weeks': [
+            {'week': week, 'finished_at': _iso(week_finished_at(season, week, lookup))}
+            for week in range(1, REGULAR_SEASON_WEEKS + 1)
+        ],
+    }
+
+
+def with_expiry(current_week: Optional[Dict], calendar: Dict) -> Optional[Dict]:
+    """
+    The current NFL week at export time, with when it stops being current
+    (its last game finished). Only regular-season weeks roll over.
+    """
+    if not current_week:
+        return None
+    finished = {w['week']: w['finished_at'] for w in calendar['weeks']}
+    expires_at = None
+    if current_week.get('season_type') == 'regular' and current_week['season'] == calendar['season']:
+        expires_at = finished.get(current_week['week'])
+    return {**current_week, 'expires_at': expires_at}
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def swap_in(new_dir: str, out_dir: str) -> None:
+    """
+    Replace out_dir with new_dir. Two renames can't be atomic together, so
+    the previous export is kept as out_dir.old until the new one is in
+    place, restored if the swap fails, and recovered on the next run if the
+    process died in between.
+    """
+    old_dir = f'{out_dir}.old'
+    if os.path.exists(old_dir):
+        if os.path.exists(out_dir):
+            shutil.rmtree(old_dir)            # leftover from a finished swap
+        else:
+            os.replace(old_dir, out_dir)      # a swap died after moving the old export aside
+
+    had_previous = os.path.exists(out_dir)
+    if had_previous:
+        os.replace(out_dir, old_dir)
+    try:
+        os.replace(new_dir, out_dir)
+    except BaseException:
+        if had_previous:
+            os.replace(old_dir, out_dir)
+        raise
+    shutil.rmtree(old_dir, ignore_errors=True)
+
+
 def write_json(path: str, data: Dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
@@ -147,6 +209,9 @@ def export(out_dir: str, seasons: Optional[List[int]] = None) -> Dict:
         if missing:
             raise SystemExit(f'No features for season(s) {missing}; available: {sorted(available)}')
 
+        calendar = season_calendar(conn, (current_week or {}).get('season') or default_season())
+        current_week = with_expiry(current_week, calendar)
+
         view = predictor.with_connection(conn)
         index_seasons = []
         latest_freshness = None
@@ -180,18 +245,16 @@ def export(out_dir: str, seasons: Optional[List[int]] = None) -> Dict:
         'positions': list(EXPORT_POSITIONS),
         'seasons': index_seasons,
         'default_season': newest if newest is not None else default_season(),
+        # The NFL week current at export time, and when it stops being current;
+        # the calendar lets the frontend place the current week at any later date
         'current_week': current_week,
+        'calendar': calendar,
         'model_trained_at': (latest_freshness or {}).get('model_trained_at'),
         'stats_through': (latest_freshness or {}).get('stats_through'),
     }
     write_json(os.path.join(tmp_dir, 'index.json'), index)
 
-    old_dir = f'{out_dir}.old'
-    shutil.rmtree(old_dir, ignore_errors=True)
-    if os.path.exists(out_dir):
-        os.replace(out_dir, old_dir)
-    os.replace(tmp_dir, out_dir)
-    shutil.rmtree(old_dir, ignore_errors=True)
+    swap_in(tmp_dir, out_dir)
     return index
 
 

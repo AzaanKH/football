@@ -60,7 +60,15 @@ export function dataSummary(data, now = Date.now()) {
     lines.push(`Week ${current.week} of ${current.season} hasn't been exported yet.`);
   }
   const ageDays = Math.floor((now - new Date(data.exportedAt).getTime()) / DAY_MS);
-  return { text: lines.join(' '), outdated: ageDays >= STALE_EXPORT_DAYS, ageDays };
+  let warning = null;
+  if (data.weekRolledOver && data.exportedWeek) {
+    // The NFL week moved on since the export: projections and injuries predate it
+    warning = `These predictions were saved during week ${data.exportedWeek.week}, which has finished, `
+      + 'so projections and injury news may be out of date.';
+  } else if (ageDays >= STALE_EXPORT_DAYS) {
+    warning = `These predictions were saved ${ageDays} days ago and may be out of date.`;
+  }
+  return { text: lines.join(' '), warning };
 }
 
 /**
@@ -234,6 +242,7 @@ const App = () => {
         unavailable: data.unavailable || [],
         freshness: data.freshness,
         currentWeek: data.current_week,
+        injuryStatusCurrent: data.injury_status_current,
         exportedAt: dataInfo?.exportedAt,
       });
     } catch (err) {
@@ -255,8 +264,10 @@ const App = () => {
   const selectedIds = players.filter(Boolean).map((p) => p.player_id);
   const ready = season != null && week != null;
   const call = verdict(predictions);
+  // Statuses are from the export: shown only for the current week, while it still is
   const showInjuries = Boolean(
-    result?.currentWeek
+    result?.injuryStatusCurrent
+    && result.currentWeek
     && result.currentWeek.season === result.request.season
     && result.currentWeek.week === result.request.week
   );
@@ -385,9 +396,9 @@ const App = () => {
               {setupError}
             </p>
           )}
-          {summary?.outdated && (
+          {summary?.warning && (
             <p role="status" className="mb-6 rounded-md border border-flag/60 px-4 py-3 text-sm text-chalk">
-              These predictions were saved {summary.ageDays} days ago and may be out of date.
+              {summary.warning}
             </p>
           )}
 
