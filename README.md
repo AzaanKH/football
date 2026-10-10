@@ -147,10 +147,99 @@ Re-run the export after each sync/retrain (and rebuild the site) to publish
 fresh predictions; the app shows when they were saved and flags exports more
 than a week old. Seasons and weeks shown are the ones exported.
 
-Frontend tests: `npm test` (Vitest). Production build: `npm run build`
-(output in `build/`), preview it with `npm run preview`.
+Frontend tests: `npm test` (Vitest + snapshot tests). For a deployable build,
+use `npm run build:site` (output in `build/`), then `npm run preview`.
+It downloads the published snapshot when `PREDICTIONS_SNAPSHOT_URL` is set,
+or validates the existing local export otherwise. Missing or invalid data
+stops the build. `npm run build:local` explicitly uses your local predictions;
+`npm run build` only compiles the frontend (used by CI without prediction data).
 
-### Deploy (Netlify)
+### Automatic deployments (Cloudflare Pages)
+
+The configured project is `football-start-sit`, serving
+<https://football-start-sit.pages.dev>. Its production branch is `main`;
+other branches receive preview deployments.
+
+Keep `public/data/` out of Git. Generate predictions locally and store a
+compressed snapshot as a public GitHub Release asset. Cloudflare downloads
+that snapshot during each build, so pushes rebuild the site while your
+computer is off. Python, Flask, the model, and PostgreSQL stay local.
+
+1. Install the [GitHub CLI](https://cli.github.com/) and run `gh auth login`.
+   From the repository root, publish the first snapshot:
+
+   ```powershell
+   ./scripts/publish-data.ps1
+   # Optional: -Seasons 2025,2026 to export fewer seasons
+   # -PrepareOnly exports, verifies, and packages without uploading
+   # -SkipExport reuses the existing export, but still verifies it by default
+   ```
+
+   The script verifies 200 sampled requests against the local predictor,
+   packages the JSON, and uploads `predictions.json.gz` to the
+   `prediction-data` release in `AzaanKH/football`. Later runs replace the
+   same asset. Both the raw export and `backend/snapshots/` are ignored by
+   Git, so refreshing data does not grow commit history. Use `-Repo owner/repo`
+   for a different **public** repository. Keep this data release mutable;
+   GitHub's release immutability prevents replacing its assets.
+
+2. Commit and push the build scripts and configuration changes. In Cloudflare,
+   create a **Pages** project with **Git integration** connected to
+   `AzaanKH/football`. Use these settings:
+
+   | Setting | Value |
+   | --- | --- |
+   | Production branch | `main` |
+   | Root directory | `frontend/fantasy-football` |
+   | Build command | `npm run build:site` |
+   | Build output directory | `build` |
+   | Environment variable `NODE_VERSION` | `24` |
+   | Environment variable `PREDICTIONS_SNAPSHOT_URL` | `https://github.com/AzaanKH/football/releases/download/prediction-data/predictions.json.gz` |
+
+   Set the snapshot URL for production and preview builds. Keep automatic
+   production deployments enabled. Cloudflare installs npm dependencies and
+   builds on pushes; no extra GitHub Actions deployment workflow is needed.
+   A project created with Direct Upload needs a new Git-integrated project
+   for this setup. An existing Git-integrated project can update these settings.
+
+   The same settings are saved in `cloudflare/pages.json`. To manage them with
+   Cloudflare's `cf` CLI after `cf auth login`, run from the frontend directory:
+
+   ```powershell
+   # Optional for accounts with multiple Cloudflare accounts:
+   # $env:CLOUDFLARE_ACCOUNT_ID = '<account-id>'
+   node scripts/configure-cloudflare.mjs edit --dry-run # inspect the request
+   npm run cloudflare:update                          # apply saved settings
+   # npm run cloudflare:create                        # first-time creation
+   cf pages deployments create football-start-sit --branch main # rebuild
+   ```
+
+   The helper invokes the pinned CLI with structured arguments so JSON works
+   in Windows PowerShell. Use the direct `node` command when passing
+   `--dry-run`; some npm/PowerShell versions consume this flag themselves.
+
+3. After a local weekly sync/retrain, run `./scripts/publish-data.ps1` again.
+   Uploading the asset alone does **not** change an already deployed site:
+   trigger a rebuild in Cloudflare, or configure a
+   [deploy hook](https://developers.cloudflare.com/pages/configuration/deploy-hooks/)
+   for `main` and keep its URL in your local `PREDICTIONS_BUILD_HOOK` environment
+   variable. The script will POST to it after a successful upload. Keep the
+   hook URL private. Code pushes always use the last published snapshot;
+   they do not refresh football data or train a model.
+
+The host serves its own copy of the JSON; visitors do not download the release
+bundle from GitHub. Each build validates all manifest files before replacing
+cached data. If a download fails, the build fails and the existing deployment
+stays live. Release asset replacement has a brief download gap; builds retry
+downloads and can be retried in the dashboard if they overlap a publish.
+
+[GitHub Release assets](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
+avoid storing generated data in Git history. The current export is comfortably
+inside [Cloudflare Pages Free limits](https://developers.cloudflare.com/pages/platform/limits/)
+(20,000 files, 25 MiB per file, 500 builds per month). No hosted API or database
+is needed. This workflow never refreshes predictions while your computer is off.
+
+### Existing Netlify deployment
 
 `scripts/deploy.ps1` exports the predictions, verifies a sample against
 `/predict_week`, runs the frontend tests, builds, and uploads `build/` with
@@ -164,7 +253,16 @@ database and model stay local; only the static site is uploaded.
 ```
 
 Set `$env:NETLIFY_SITE_ID` to skip `-Site`. Re-run after each weekly
-sync/retrain to publish fresh predictions.
+sync/retrain to publish fresh predictions. This command always builds from
+your local export, even if `PREDICTIONS_SNAPSHOT_URL` is set.
+
+Netlify Git builds can also use `npm run build:site`, base directory
+`frontend/fantasy-football`, publish directory `build`, and the same snapshot
+URL environment variable. Leave your other projects' automatic builds enabled;
+only this project's build settings need to change. Cloudflare Pages is the
+recommended free host for this setup; Netlify's current credit-based Free plan
+charges [credits per production deploy](https://docs.netlify.com/manage/accounts-and-billing/billing/billing-for-credit-based-plans/how-credits-work/), so check your account's plan before
+scheduling frequent deploys.
 
 ### 7. Open the app
 

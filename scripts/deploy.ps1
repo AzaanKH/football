@@ -83,7 +83,7 @@ if (-not (Test-Path (Join-Path $frontend 'public/data/index.json'))) {
 Push-Location $frontend
 try {
     Invoke-Step 'Test frontend' { npm test }
-    Invoke-Step 'Build frontend' { npm run build }
+    Invoke-Step 'Build frontend with local predictions' { npm run build:local }
 
     $deployArgs = @('deploy', '--dir', 'build', '--site', $Site,
                     '--message', "Predictions exported $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
