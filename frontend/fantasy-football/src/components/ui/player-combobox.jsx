@@ -5,6 +5,7 @@ import { Check, ChevronsUpDown } from "lucide-react"
 import { cn } from "../../lib/utils"
 import { isCancel, searchPlayers } from "../../lib/api"
 import { Button } from "./button"
+import { PlayerPhoto } from "../player-photo"
 import {
   Command,
   CommandEmpty,
@@ -22,7 +23,7 @@ import {
 const SEARCH_DEBOUNCE_MS = 250
 
 /**
- * Searchable player picker backed by server-side search, so every player is
+ * Searchable player picker backed by the saved week file, so every player is
  * reachable (not just a preloaded page). `value` is a player object
  * ({player_id, name, team}) so the label survives new search results.
  */
@@ -85,8 +86,11 @@ export function PlayerCombobox({
           className="w-full justify-between border-yardline bg-turf font-normal text-chalk hover:bg-turf/70 hover:text-chalk"
         >
           {value ? (
-            <span className="truncate">
-              {value.name} {value.team ? `(${value.team})` : ''}
+            <span className="flex min-w-0 items-center gap-2">
+              <PlayerPhoto playerId={value.player_id} name={value.name} size="sm" className="-ml-1.5" />
+              <span className="truncate">
+                {value.name} {value.team ? `(${value.team})` : ''}
+              </span>
             </span>
           ) : (
             <span className="text-chalk-muted">{placeholder}</span>
@@ -100,7 +104,7 @@ export function PlayerCombobox({
         className="flex max-h-[min(22rem,var(--radix-popover-content-available-height))] w-[min(350px,calc(100vw-2rem))] flex-col border-yardline bg-popover p-0"
         align="start"
       >
-        {/* Filtering happens on the server; cmdk only handles keyboard navigation */}
+        {/* Filtering happens in searchPlayers; cmdk only handles keyboard navigation */}
         <Command className="min-h-0 bg-transparent" shouldFilter={false}>
           <CommandInput
             value={query}
@@ -119,7 +123,7 @@ export function PlayerCombobox({
             )}
             {status === "error" && (
               <div role="alert" className="py-6 text-center text-sm text-chalk">
-                Search failed. Check that the backend is running.
+                Couldn't load players for this week. Try again.
               </div>
             )}
             <CommandGroup>
@@ -138,10 +142,11 @@ export function PlayerCombobox({
                   >
                     <Check
                       className={cn(
-                        "mr-2 h-4 w-4",
+                        "mr-1 h-4 w-4",
                         isSelected ? "opacity-100 text-scrimmage" : "opacity-0"
                       )}
                     />
+                    <PlayerPhoto playerId={player.player_id} name={player.name} size="sm" className="mr-2" />
                     <span className="flex-1 truncate">{player.name}</span>
                     {player.team && (
                       <span className="ml-2 text-xs text-chalk-secondary">{player.team}</span>

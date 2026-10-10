@@ -5,13 +5,12 @@ import App from './App';
 import * as api from './lib/api';
 
 vi.mock('./lib/api', () => ({
-  getModelStatus: vi.fn(),
   getSeasons: vi.fn(),
   getWeeks: vi.fn(),
   searchPlayers: vi.fn(),
   predictWeek: vi.fn(),
-  isCancel: (error) => error?.name === 'CanceledError',
-  errorMessage: (error, fallback) => error?.response?.data?.error || fallback,
+  isCancel: (error) => error?.name === 'AbortError',
+  errorMessage: (error, fallback) => (error?.name === 'DataError' ? error.message : fallback),
 }));
 
 const PLAYERS = [
@@ -42,9 +41,20 @@ const response = (predictions, extra = {}) => ({
   current_week: { season: 2026, week: 5 }, ...extra,
 });
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const savedData = (extra = {}) => ({
+  seasons: [2025, 2024],
+  default: 2025,
+  currentWeek: { season: 2025, week: 7 },
+  currentWeekSaved: true,
+  exportedAt: new Date(Date.now() - DAY_MS).toISOString(),
+  statsThrough: { season: 2025, week: 6 },
+  ...extra,
+});
+
 beforeEach(() => {
-  api.getModelStatus.mockResolvedValue({ weekly_predictor_available: true });
-  api.getSeasons.mockResolvedValue({ seasons: [2025, 2024], default: 2025 });
+  api.getSeasons.mockResolvedValue(savedData());
   api.getWeeks.mockResolvedValue([{ week: 6, players: 500 }, { week: 7, players: 510 }]);
   api.searchPlayers.mockImplementation(async ({ search }) =>
     PLAYERS.filter((p) => !search || p.name.toLowerCase().includes(search.toLowerCase()))
@@ -77,7 +87,7 @@ test('uses the season and latest week from the backend', async () => {
   expect(api.getWeeks).toHaveBeenCalledWith(2025, expect.anything());
 });
 
-test('player search runs on the server for the selected week', async () => {
+test('player search uses the selected season, week and position', async () => {
   const user = userEvent.setup();
   await renderReady();
 
@@ -129,7 +139,7 @@ test('changing inputs cancels a pending prediction and ignores its answer', asyn
   api.predictWeek.mockImplementation((request, signal) => {
     pendingSignal = signal;
     return new Promise((resolve, reject) => {
-      signal.addEventListener('abort', () => reject({ name: 'CanceledError' }));
+      signal.addEventListener('abort', () => reject({ name: 'AbortError' }));
     });
   });
   await renderReady();
@@ -167,23 +177,43 @@ test('shows unavailable players with their reason', async () => {
   expect(within(notProjected).getByText('Bye week')).toBeInTheDocument();
 });
 
-test('shows the API error message when prediction fails', async () => {
+test('says which week has no saved predictions when loading fails', async () => {
   const user = userEvent.setup();
-  api.predictWeek.mockRejectedValue({ response: { data: { error: 'Weekly predictor not available' } } });
+  api.predictWeek.mockRejectedValue({ name: 'DataError', message: 'No saved predictions for week 7 of 2025.' });
   await renderReady();
 
   await selectPlayer(user, 'Derrick Henry');
   await user.click(predictButton());
 
-  expect(await screen.findByRole('alert')).toHaveTextContent('Weekly predictor not available');
+  expect(await screen.findByRole('alert')).toHaveTextContent('No saved predictions for week 7 of 2025.');
 });
 
-test('shows a setup error when the backend is unreachable', async () => {
-  const user = userEvent.setup();
-  api.getSeasons.mockRejectedValue(new Error('Network Error'));
+test('shows a setup error when the saved predictions cannot be loaded', async () => {
+  api.getSeasons.mockRejectedValue(new TypeError('Failed to fetch'));
   render(<App />);
 
-  expect(await screen.findByRole('alert')).toHaveTextContent(/can't reach the prediction server/i);
+  expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load the saved predictions. Try reloading.");
+});
+
+test('describes the saved data and its freshness before comparing', async () => {
+  await renderReady();
+
+  const summary = screen.getByText(/saved predictions for the 2024-2025 seasons, exported/i);
+  expect(summary).toHaveTextContent('Stats through 2025 week 6.');
+  expect(summary).not.toHaveTextContent(/hasn't been exported/);
+  expect(screen.queryByText(/may be out of date/i)).not.toBeInTheDocument();
+});
+
+test('flags an old export and a current week that was not saved', async () => {
+  api.getSeasons.mockResolvedValue(savedData({
+    exportedAt: new Date(Date.now() - 10 * DAY_MS).toISOString(),
+    currentWeek: { season: 2025, week: 8 },
+    currentWeekSaved: false,
+  }));
+  await renderReady();
+
+  expect(screen.getByRole('status')).toHaveTextContent('These predictions were saved 10 days ago and may be out of date.');
+  expect(screen.getByText(/week 8 of 2025 hasn't been exported yet/i)).toBeInTheDocument();
 });
 
 test('names the decision: start the clear leader, or flag a close call', async () => {
@@ -197,11 +227,16 @@ test('names the decision: start the clear leader, or flag a close call', async (
 
   expect(await screen.findByRole('heading', { name: 'Start Bijan Robinson' })).toBeInTheDocument();
   expect(screen.getByText('Projects 4.4 more points than Derrick Henry.')).toBeInTheDocument();
+  // The recommended player is pictured; the other isn't
+  expect(screen.getAllByTestId('player-cutout').map((img) => img.getAttribute('src'))).toEqual([
+    'https://sleepercdn.com/content/nfl/players/thumb/9509.jpg',
+  ]);
 
   api.predictWeek.mockResolvedValueOnce(response([prediction(PLAYERS[1], 17.0), prediction(PLAYERS[0], 16.8)]));
   await user.click(predictButton());
   expect(await screen.findByRole('heading', { name: 'Close call: Bijan Robinson or Derrick Henry' }))
     .toBeInTheDocument();
+  expect(screen.getAllByTestId('player-cutout')).toHaveLength(2); // both, same size
 });
 
 test('shows injury status only when the result is for the current week, and says why', async () => {
@@ -215,6 +250,7 @@ test('shows injury status only when the result is for the current week, and says
   expect(screen.queryByText('Questionable')).not.toBeInTheDocument();
   expect(screen.getByText(/injury status is shown only for the current week \(2026 week 5\)/i)).toBeInTheDocument();
   expect(screen.getByText(/stats through 2025 week 18/i)).toBeInTheDocument();
+  expect(screen.getByText(/predictions saved/i)).toBeInTheDocument();
   expect(screen.getByText(/all points are ppr/i)).toBeInTheDocument();
 });
 

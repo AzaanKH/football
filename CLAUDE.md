@@ -26,6 +26,7 @@ that imports this file.
 football/
 ├── backend/                     Python 3.13, Flask, PostgreSQL
 │   ├── app.py                   REST API (port 5001)
+│   ├── export_static.py         Predictions -> frontend public/data/*.json
 │   ├── weekly_predictor.py      Training + inference (WeeklyPredictor)
 │   ├── metrics.py               start/sit accuracy, coverage, conformal helpers
 │   ├── evaluation.py            Baseline comparison on held-out weeks
@@ -50,7 +51,7 @@ football/
 │   └── src/
 │       ├── main.jsx             Entry point
 │       ├── App.jsx              Page, state, request lifecycle
-│       ├── lib/api.js           All HTTP calls (base URL: VITE_API_BASE)
+│       ├── lib/api.js           Loads the exported JSON (search, predictions)
 │       ├── lib/predictionState.js  Request identity / stale-result logic
 │       └── components/range-field.jsx  The yard-line range chart
 └── .claude/skills/frontend-design/  Design skill (use for UI work)
@@ -81,6 +82,10 @@ python scheduler.py start | run-now | status | dry-run
 # Model
 python weekly_predictor.py train      # measures on held-out weeks, refits on all, saves
 python evaluation.py [qb rb wr]       # model vs 3/5-game avg vs Sleeper
+
+# Static export (what the frontend reads)
+python export_static.py [--seasons 2025 2026]   # -> frontend public/data/
+python export_static.py --verify                 # export vs /predict_week
 
 # Tests
 python -m pytest -m unit              # fast, no DB/network
@@ -193,8 +198,13 @@ upsert keeps the stored context (`COALESCE`) instead of writing NULL.
   `BadRequest` for a 400. Don't return exception text in 500s.
 
 **Frontend**
-- All requests go through `src/lib/api.js`. Results are stored with the request
-  that produced them; outdated requests are cancelled with `AbortController`.
+- The frontend has no backend: `src/lib/api.js` reads the static export
+  (`public/data/index.json`, `<season>/week-NN/<position>.json`, written by
+  `backend/export_static.py` with the same shape as `/predict_week`), caches
+  each file, and searches locally. Static hosts answer a missing file with
+  `index.html` (200), so loads check the content type. Results are stored
+  with the request that produced them; outdated requests are cancelled with
+  `AbortController`.
 - Design: turf palette in the `@theme` block of `src/index.css` (Tailwind 4,
   CSS-first config; no tailwind.config.js), validated with the dataviz
   palette checker. Scrimmage blue `#3D8EF0` is the only data color; pylon
@@ -204,6 +214,12 @@ upsert keeps the stored context (`COALESCE`) instead of writing NULL.
 - The palette is defined once (hex, in `@theme`); shadcn semantic tokens
   (`--color-card`, `--color-ring`, ...) point at it, and in-between shades
   are `color-mix(in oklch, ...)`. Don't add HSL copies or hard-coded hex.
+- Player photos (`components/player-photo.jsx`) are Sleeper's headshots by
+  player ID (`sleepercdn.com/.../thumb/<id>.jpg`, transparent cutouts;
+  unknown IDs return 403). Discs fall back to initials and are decorative
+  (`alt=""`, the name is always beside them); the verdict shows the named
+  players as cutouts on a yard line. Hotlinked and unofficial: the app must
+  work with every photo failing.
 - Touch targets: add the `hit-area` utility (index.css) to compact controls;
   it grows the clickable area to 44px without changing the visual. Movement
   (zoom/slide/scale) goes behind `motion-safe:`; fades may stay unconditional.
